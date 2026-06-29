@@ -73,11 +73,12 @@ def generate_video(
     Returns:
         Path to the downloaded video, or None on failure.
     """
+    api_key = os.getenv("KLING_API_KEY")
     access_key = os.getenv("KLING_ACCESS_KEY")
     secret_key = os.getenv("KLING_SECRET_KEY")
-    if not access_key or not secret_key:
+    if not api_key and (not access_key or not secret_key):
         raise ValueError(
-            "KLING_ACCESS_KEY and KLING_SECRET_KEY must be set in environment variables."
+            "Set KLING_API_KEY, or set both KLING_ACCESS_KEY and KLING_SECRET_KEY."
         )
 
     # Read image dimensions and determine aspect ratio
@@ -97,10 +98,16 @@ def generate_video(
         with open(image_tail_path, "rb") as f:
             tail_b64 = base64.b64encode(f.read()).decode()
 
-    token = _generate_jwt_token(access_key, secret_key)
-    base_url = "https://api.klingai.com"
+    token = None if api_key else _generate_jwt_token(access_key, secret_key)
+    base_url = os.getenv(
+        "KLING_BASE_URL",
+        "https://api-beijing.klingai.com" if api_key else "https://api.klingai.com",
+    ).rstrip("/")
     create_url = f"{base_url}/v1/videos/image2video"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key or token}",
+    }
 
     payload = {
         "model_name": model_name,
@@ -131,7 +138,7 @@ def generate_video(
         max_attempts, interval = 120, 5
 
         for attempt in range(max_attempts):
-            if attempt > 0 and attempt % 60 == 0:
+            if not api_key and attempt > 0 and attempt % 60 == 0:
                 token = _generate_jwt_token(access_key, secret_key)
                 headers["Authorization"] = f"Bearer {token}"
 

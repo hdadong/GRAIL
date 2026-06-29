@@ -273,6 +273,18 @@ class HOIOptimizer:
 
     def _detect_interaction(self, obj_poses_incam, images_path, human_masks, obj_masks):
         """Detect interaction start/end frame."""
+        manual_start = self.cfg.get("inter_start_idx", None)
+        if manual_start is not None:
+            manual_end = self.cfg.get("inter_end_idx", len(images_path))
+            if manual_end is None or manual_end < 0:
+                manual_end = len(images_path)
+            is_static_obj = bool(self.cfg.get("is_static_obj", False))
+            self.logger.info(
+                f"Using configured interaction window: {manual_start}/{len(images_path)} "
+                f"to {manual_end}/{len(images_path)}"
+            )
+            return int(manual_start), int(manual_end), is_static_obj
+
         has_interaction_end = self.cfg.get("has_interaction_end", False)
         if self.cfg.get("detect_interaction_with_mask", False):
             self.logger.info("Using mask-based interaction detection")
