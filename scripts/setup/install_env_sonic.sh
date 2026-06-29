@@ -143,8 +143,12 @@ if [[ ! -d "${GMR_DIR}/general_motion_retargeting" ]]; then
 fi
 
 # --- Step 1: apply NVIDIA GMR overrides ---------------------------------
-echo ">>> Applying GMR overrides: ${OVERRIDES} -> ${GMR_DIR}"
-rsync -a --exclude='README.md' "${OVERRIDES}/" "${GMR_DIR}/"
+if [[ -d "${OVERRIDES}" ]]; then
+    echo ">>> Applying GMR overrides: ${OVERRIDES} -> ${GMR_DIR}"
+    rsync -a --exclude='README.md' "${OVERRIDES}/" "${GMR_DIR}/"
+else
+    echo ">>> No GMR overrides found at ${OVERRIDES}; using runtime patches from grail.adapters.gmr"
+fi
 
 # --- Step 2: surface data/ and models/ into the SONIC submodule ---------
 # imports/SONIC/gear_sonic/ is the cwd for training scripts; it expects
