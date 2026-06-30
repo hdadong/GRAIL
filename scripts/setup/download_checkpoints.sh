@@ -217,9 +217,11 @@ if [ "$SKIP_FOUNDATIONPOSE" = false ]; then
     section "FoundationPose weights"
 
     FP_SCORER="imports/FoundationPose/weights/2024-01-11-20-02-45/model_best.pth"
+    FP_SCORER_CFG="imports/FoundationPose/weights/2024-01-11-20-02-45/config.yml"
     FP_REFINER="imports/FoundationPose/weights/2023-10-28-18-33-37/model_best.pth"
+    FP_REFINER_CFG="imports/FoundationPose/weights/2023-10-28-18-33-37/config.yml"
 
-    if [ -f "$FP_SCORER" ] && [ -f "$FP_REFINER" ] && [ "$FORCE" = false ]; then
+    if [ -f "$FP_SCORER" ] && [ -f "$FP_SCORER_CFG" ] && [ -f "$FP_REFINER" ] && [ -f "$FP_REFINER_CFG" ] && [ "$FORCE" = false ]; then
         ok "FoundationPose weights (already exist)"
     else
         python3 -c "from huggingface_hub import hf_hub_download" 2>/dev/null || {
@@ -230,7 +232,9 @@ if [ "$SKIP_FOUNDATIONPOSE" = false ]; then
         # Two-network pipeline: scorer ranks pose hypotheses, refiner regresses pose deltas.
         # Timestamp dir names are load-path sensitive — FoundationPose's loader hardcodes them.
         hf_grail_download "FoundationPose/weights/2024-01-11-20-02-45/model_best.pth"
+        hf_grail_download "FoundationPose/weights/2024-01-11-20-02-45/config.yml"
         hf_grail_download "FoundationPose/weights/2023-10-28-18-33-37/model_best.pth"
+        hf_grail_download "FoundationPose/weights/2023-10-28-18-33-37/config.yml"
     fi
 else
     section "FoundationPose weights (skipped)"
@@ -338,7 +342,9 @@ check_file "imports/GEM-SOMA/inputs/mhr_data/MHR/base_body_lod6.obj"            
 
 # FoundationPose
 check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/model_best.pth"         "FoundationPose ScorePredictor"
+check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/config.yml"             "FoundationPose ScorePredictor config"
 check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/model_best.pth"         "FoundationPose PoseRefinePredictor"
+check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/config.yml"             "FoundationPose PoseRefinePredictor config"
 
 # Hunyuan3D-2.1
 check_file "imports/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"               "RealESRGAN (Hunyuan3D)"

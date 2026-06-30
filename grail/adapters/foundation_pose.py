@@ -98,7 +98,11 @@ if __name__ == "__main__":
 
     scorer = ScorePredictor()
     refiner = PoseRefinePredictor()
-    glctx = dr.RasterizeCudaContext()
+    try:
+        glctx = dr.RasterizeCudaContext()
+    except RuntimeError as exc:
+        logging.warning("RasterizeCudaContext failed; falling back to RasterizeGLContext: %s", exc)
+        glctx = dr.RasterizeGLContext()
     est = FoundationPose(
         model_pts=mesh.vertices,
         model_normals=mesh.vertex_normals,
