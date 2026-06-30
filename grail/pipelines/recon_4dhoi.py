@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
+from openai import APIStatusError
 
 from grail.core.config import load_recon_config
 from grail.core.dataset import category2object
@@ -47,6 +48,13 @@ from grail.preprocessing.preprocess import (
 )
 from grail.visualization.scenepic import ScenepicVisualizer
 from grail.visualization.utils.vis_utils import prep_visualizer_input
+
+
+def _is_openai_hard_error(exc: Exception) -> bool:
+    """Return True for OpenAI auth/quota/rate-limit failures that must stop the run."""
+    if isinstance(exc, APIStatusError) and exc.status_code in {401, 403, 429}:
+        return True
+    return "insufficient_quota" in str(exc)
 
 
 def _strip_mp4(video_id):
@@ -318,6 +326,8 @@ def step4_optimize_4dhoi(video_ids, args):
 
         except Exception as e:
             print(f"  Error (step4) {video_id}: {e}\n{traceback.format_exc()}")
+            if _is_openai_hard_error(e):
+                raise
 
 
 def step5_filter_hoi_result(video_ids, args):
