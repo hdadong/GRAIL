@@ -41,7 +41,15 @@ def _ensure_openai_key_present() -> None:
 
 
 def _make_client() -> OpenAI:
-    """Standard OpenAI API client."""
+    """OpenAI-compatible API client.
+
+    Set OPENAI_BASE_URL or NEWAPI_BASE_URL to route requests through an
+    OpenAI-compatible gateway such as NewAPI. The value should include /v1,
+    e.g. https://your-platform.example/v1.
+    """
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("NEWAPI_BASE_URL")
+    if base_url:
+        return OpenAI(base_url=base_url.rstrip("/"))
     return OpenAI()
 
 
