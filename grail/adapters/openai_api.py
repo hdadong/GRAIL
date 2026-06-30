@@ -6,9 +6,9 @@ from typing import Any
 
 from openai import OpenAI
 
-DEFAULT_CHAT_MODEL = "gpt-4o"
-DEFAULT_REASONING_MODEL = "gpt-4o"
-DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
+DEFAULT_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o")
+DEFAULT_REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", DEFAULT_CHAT_MODEL)
+DEFAULT_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 
 _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4")
 
