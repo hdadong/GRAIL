@@ -1,0 +1,6 @@
+dataset: RoboCasa
+objects:
+  apple_0:
+    # Scale from data/RoboCasa/apple_0/model.xml visual mesh scale.
+    obj_scale: [0.075, 0.075, 0.075]
+    scene: indoor2-pickup-table

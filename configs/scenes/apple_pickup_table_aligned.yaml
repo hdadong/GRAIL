@@ -1,0 +1,26 @@
+indoor2-pickup-table:
+  blender_file_name: indoor2
+  character_pos: [5.5, 14.5, 0.1365]
+  character_rot: [90, 0, 0]
+  character_scale: [0.01, 0.01, 0.01]
+  # Current indoor2.blend visible dining table top is z ~= 0.93702.
+  obj_pos: [5.5, 13.7, 0.937]
+  obj_scale: [0.1, 0.1, 0.1]
+  obj_rot: [90, 0, 0]
+  static_objects:
+    table1:
+      name: long_table.obj
+      # Center of TableDiningFactory(...).spawn_asset bbox, bottom of top slab.
+      pos: [5.94616, 13.55072, 0.89702]
+      rot: [90, 0, 0]
+      scale: [1.0, 1.0, 0.6]
+      opacity: 0.0
+  camera_elevation: 10
+  camera_azimuth: 300
+  camera_radius: 3.15
+  camera_offset: [0, 0, 0]
+  character_pos_box_include: [-0.5, -0.4, 0.5, 0]
+  character_pos_box_exclude: [-0.2, -0.4, 0.2, -0.3]
+  character_rot_rand_max: [0, 0, 10]
+  obj_pos_rand_max: [0.1, 0.2, 0]
+  obj_pos_rand_min: [-0.1, 0, 0]

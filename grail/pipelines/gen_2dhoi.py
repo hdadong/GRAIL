@@ -516,7 +516,8 @@ def step4_generate_videos(dataset, category, args):
             raise ValueError(f"Invalid num_rand_scenes: {args.num_rand_scenes}")
 
         def _rand_num(p):
-            m = re.search(r"_rand(\d+)", os.path.splitext(os.path.basename(p))[0])
+            stem = os.path.splitext(os.path.basename(p))[0]
+            m = re.search(r"_(?:rand|start|end)(\d+)", stem)
             return int(m.group(1)) if m else None
 
         image_paths = sorted(p for p in image_paths if _rand_num(p) in valid)

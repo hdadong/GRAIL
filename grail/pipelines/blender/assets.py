@@ -755,7 +755,8 @@ def set_object_opacity(obj, opacity):
             # Enable nodes if not already
             mat.use_nodes = True
             mat.blend_method = "BLEND"  # Enable alpha blending
-            mat.shadow_method = "HASHED"  # Better shadow handling for transparent objects
+            if hasattr(mat, "shadow_method"):
+                mat.shadow_method = "HASHED"  # Better shadow handling for transparent objects
 
             nodes = mat.node_tree.nodes
             links = mat.node_tree.links

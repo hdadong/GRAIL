@@ -12,6 +12,10 @@ def category2object(data_path, category):
         f"{data_path}/{category}/model.usda",
         f"{data_path}/{category}/{category}.obj",
         f"{data_path}/{category}/mesh.obj",
+        # RoboCasa stores visual meshes under visual/ and collision meshes under
+        # collision/. Prefer visual assets so rendering does not pick proxies.
+        f"{data_path}/{category}/visual/model_normalized_0.obj",
+        f"{data_path}/{category}/visual/*.obj",
         f"{data_path}/{category}/*/model.obj",
         f"{data_path}/{category}/*.obj",
         f"{data_path}/{category}/*.usda",

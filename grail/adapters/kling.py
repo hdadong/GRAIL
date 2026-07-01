@@ -125,7 +125,7 @@ def generate_video(
 
     try:
         # Create task
-        resp = requests.post(create_url, headers=headers, json=payload)
+        resp = requests.post(create_url, headers=headers, json=payload, timeout=300)
         data = resp.json()
         if resp.status_code != 200 or data.get("code") != 0:
             raise RuntimeError(f"Task creation failed: {data}")
@@ -143,8 +143,13 @@ def generate_video(
                 headers["Authorization"] = f"Bearer {token}"
 
             time.sleep(interval)
-            status_resp = requests.get(query_url, headers=headers)
-            status_data = status_resp.json()
+            try:
+                status_resp = requests.get(query_url, headers=headers, timeout=60)
+                status_data = status_resp.json()
+            except Exception as poll_error:
+                if attempt % 6 == 0:
+                    print(f"  Poll error: {poll_error} ({attempt + 1}/{max_attempts})")
+                continue
 
             if status_resp.status_code != 200 or status_data.get("code") != 0:
                 continue
