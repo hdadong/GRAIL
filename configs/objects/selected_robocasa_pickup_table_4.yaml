@@ -1,0 +1,14 @@
+dataset: RoboCasa
+objects:
+  apple_0:
+    obj_scale: [0.075, 0.075, 0.075]
+    scene: indoor2-pickup-table
+  banana_1:
+    obj_scale: [0.075, 0.075, 0.075]
+    scene: indoor2-pickup-table
+  bowl_0:
+    obj_scale: [0.075, 0.075, 0.075]
+    scene: indoor2-pickup-table
+  can_0:
+    obj_scale: [0.075, 0.075, 0.075]
+    scene: indoor2-pickup-table

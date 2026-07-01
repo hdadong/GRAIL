@@ -89,6 +89,221 @@ python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_dri
 
 Full install, dataset, and config notes: see [Documentation](#documentation) below.
 
+## Reproducing Asset Prep And Selected-Asset Runs
+
+This section records the operational steps used for the small selected-asset
+run in this workspace. It is intended as a copyable recipe for another server.
+Do not commit API keys; put provider credentials in `.env` or `.quickstart_env`
+and `source` that file before running stages that call OpenAI-compatible or
+Kling APIs.
+
+### Large-data storage
+
+If a shared TOS/GPFS path is available, keep large datasets, model caches, and
+generated assets there, then symlink them back to the paths expected by GRAIL:
+
+```bash
+mkdir -p /physis/bx-workspace/GRAIL_storage/{root_cache,GRAIL/data,tmp_robocasa_probe}
+
+rsync -aH --delete /root/.cache/huggingface/ \
+  /physis/bx-workspace/GRAIL_storage/root_cache/huggingface/
+mv /root/.cache/huggingface /root/.cache/huggingface.local
+ln -s /physis/bx-workspace/GRAIL_storage/root_cache/huggingface /root/.cache/huggingface
+
+rsync -aH --delete /root/.cache/hy3dgen/ \
+  /physis/bx-workspace/GRAIL_storage/root_cache/hy3dgen/
+mv /root/.cache/hy3dgen /root/.cache/hy3dgen.local
+ln -s /physis/bx-workspace/GRAIL_storage/root_cache/hy3dgen /root/.cache/hy3dgen
+```
+
+Use the same pattern for cold GRAIL data such as `data/ComAsset`,
+`data/Scene`, `data/RoboCasa`, `data/Terrain`, and `data/gen_stairs`. Keep
+hot training paths such as `data/motion_lib/` local while training is running.
+
+### Procedural terrain assets
+
+Generate 10 curbs, 10 slopes, and 10 procedural stairs:
+
+```bash
+cd /root/GRAIL
+conda run -n sonic python -m grail.pipelines.gen_terrain \
+  --type all --num 10 --output_dir data/Terrain
+```
+
+Expected layout:
+
+```text
+data/Terrain/
+  curb_000..curb_009/{model.obj,model.mtl,texture.jpg}
+  slope_000..slope_009/{model.obj,model.mtl,texture.jpg}
+  stairs_000..stairs_009/{model.obj,model.mtl,texture.jpg}
+```
+
+For the selected run, use `configs/objects/selected_terrain_4.yaml`:
+`curb_000`, `curb_001`, `slope_000`, and `slope_001`.
+
+### Hunyuan generated stair assets
+
+Create a small input list, then generate textured meshes:
+
+```bash
+cd /root/GRAIL
+conda run -n hunyuan python -m pip install --no-cache-dir open3d==0.18.0
+
+set -a
+source .quickstart_env   # OPENAI-compatible endpoint/key, no secrets in git
+set +a
+
+conda run -n hunyuan python -u -m grail.pipelines.gen_3d_assets \
+  -i configs/gen_3d/gen_stairs_10.yaml \
+  -o data/gen_stairs
+```
+
+Each generated stair folder should contain `model.obj`, `model.mtl`, and
+`model.jpg`. `open3d` is required by the Hunyuan texture/remesh stage; without
+it the pipeline may stop after `mesh.glb` / `white_mesh_remesh.obj`.
+
+For the selected run, use `configs/objects/selected_gen_stairs_4.yaml`, which
+selects the first four completed Hunyuan stair assets.
+
+### RoboCasa object assets
+
+The small selected run uses official RoboCasa objaverse assets. One practical
+way to stage them is:
+
+```bash
+cd /root
+git clone https://github.com/ARISE-Initiative/robocasa.git tmp_robocasa_probe/robocasa
+# Download and extract the official RoboCasa objaverse asset archive into:
+# /root/tmp_robocasa_probe/robocasa/robocasa/models/assets/objects/objaverse
+
+cd /root/GRAIL
+mkdir -p data/RoboCasa
+```
+
+Then symlink each official object instance directory into `data/RoboCasa/`.
+Keep any existing locomanip assets under a separate pointer if needed:
+
+```bash
+ln -sfn \
+  /root/GRAIL/imports/SONIC/decoupled_wbc/dexmg/gr00trobocasa/robocasa/models/assets/objects/omniverse/locomanip \
+  data/RoboCasa_locomanip
+
+# Example for one objaverse instance:
+ln -sfn \
+  /root/tmp_robocasa_probe/robocasa/robocasa/models/assets/objects/objaverse/apple_0 \
+  data/RoboCasa/apple_0
+```
+
+Validate that the configured assets resolve:
+
+```bash
+python - <<'PY'
+import os, yaml
+with open("configs/objects/robocasa.yaml") as f:
+    data = yaml.safe_load(f)
+names = list(data["objects"].keys())
+ok = sum(os.path.exists(os.path.join("data/RoboCasa", n)) for n in names)
+print(f"RoboCasa resolvable: {ok}/{len(names)}")
+PY
+```
+
+For the selected run, use `configs/objects/selected_robocasa_pickup_table_4.yaml`:
+`apple_0`, `banana_1`, `bowl_0`, and `can_0`.
+
+### Selected 12-asset G1 trajectory run
+
+Generate 2D HOI videos:
+
+```bash
+cd /root/GRAIL
+set -a; source .quickstart_env; set +a
+
+conda run -n sonic python -u -m grail.pipelines.gen_2dhoi \
+  --config configs/gen_2dhoi/selected_terrain_4.yaml --skip_done
+
+conda run -n sonic python -u -m grail.pipelines.gen_2dhoi \
+  --config configs/gen_2dhoi/selected_gen_stairs_4.yaml --skip_done
+
+conda run -n sonic python -u -m grail.pipelines.gen_2dhoi \
+  --config configs/gen_2dhoi/selected_robocasa_pickup_table_4.yaml --skip_done
+```
+
+Run 4D reconstruction in the `grail` environment. If the host only has
+`sonic`/`hunyuan`, use the provided Docker image and mount both the repo and
+shared storage so symlinked datasets remain visible:
+
+```bash
+docker run --rm --gpus all --net=host --ipc=host --entrypoint="" \
+  -v /root/GRAIL:/workspace/grail \
+  -v /physis:/physis \
+  -w /workspace/grail docker.io/nvgrail/grail:latest \
+  bash -lc 'source /root/miniconda3/etc/profile.d/conda.sh &&
+    conda activate grail &&
+    set -a && source .quickstart_env && set +a &&
+    export PYTHONUNBUFFERED=1 HYDRA_FULL_ERROR=1 &&
+    python -u -m grail.pipelines.recon_4dhoi \
+      --config configs/recon_4dhoi/loco_smplx.yaml \
+      --dataset Terrain \
+      --results_dir results_collection/selected_terrain_4 \
+      --skip_done'
+```
+
+Repeat with `--dataset gen_stairs --results_dir results_collection/selected_gen_stairs_4`
+for Hunyuan stairs. For tabletop RoboCasa pickup, use
+`--config configs/recon_4dhoi/pickup_smplx.yaml --dataset RoboCasa --results_dir results_collection/selected_robocasa_pickup_table_4`.
+
+Retarget to Unitree G1:
+
+```bash
+conda run -n sonic python -m grail.pipelines.retarget \
+  --data_dir results_collection/selected_terrain_4/generation/4dhoi_recon_smplx_valid \
+  --output_folder selected_terrain_4_g1 \
+  --no_process --no_bps --zero_out_wrist
+
+conda run -n sonic python -m grail.pipelines.retarget \
+  --data_dir results_collection/selected_gen_stairs_4/generation/4dhoi_recon_smplx_valid \
+  --output_folder selected_gen_stairs_4_g1 \
+  --no_process --no_bps --zero_out_wrist
+
+conda run -n sonic python -m grail.pipelines.retarget \
+  --data_dir results_collection/selected_robocasa_pickup_table_4/generation/4dhoi_recon_smplx_valid \
+  --output_folder selected_robocasa_pickup_table_4_g1
+```
+
+Train with the official SONIC configs. Terrain uses the scene/terrain tracking
+config; pickup/manipulation data uses a HOI config:
+
+```bash
+cd /root/GRAIL/imports/SONIC
+export HYDRA_FULL_ERROR=1 PYTHONUNBUFFERED=1 WANDB_MODE=online
+
+accelerate launch --num_processes=8 train_agent_trl.py \
+  +exp=manager/universal_token/scene/terrain_tracking \
+  num_envs=4096 headless=True \
+  ++resume=True \
+  ++checkpoint=models/terrain_stairs/last.pt \
+  experiment_dir=/root/GRAIL/imports/SONIC/logs_rl/GRAB_Tracking/selected_terrain_multitask \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file=/root/GRAIL/data/motion_lib/selected_terrain_4_g1/robot \
+  ++manager_env.commands.motion.motion_lib_cfg.object_motion_file=/root/GRAIL/data/motion_lib/selected_terrain_4_g1/objects \
+  ++manager_env.config.terrain_motion_dir=/root/GRAIL/data/motion_lib/selected_terrain_4_g1
+```
+
+For multi-object pickup:
+
+```bash
+accelerate launch --num_processes=8 train_agent_trl.py \
+  +exp=manager/universal_token/hoi/pnp_table \
+  num_envs=2048 headless=True \
+  ++resume=True \
+  ++checkpoint=models/pnp_table/last.pt \
+  experiment_dir=/root/GRAIL/imports/SONIC/logs_rl/GRAB_Tracking/selected_robocasa_pickup_table_4 \
+  ++manager_env.commands.motion.motion_lib_cfg.motion_file=/root/GRAIL/data/motion_lib/selected_robocasa_pickup_table_4_g1_ha/robot \
+  ++manager_env.commands.motion.motion_lib_cfg.object_motion_file=/root/GRAIL/data/motion_lib/selected_robocasa_pickup_table_4_g1_ha/objects \
+  ++manager_env.config.object_usd_path=/root/GRAIL/data/motion_lib/selected_robocasa_pickup_table_4_g1_ha/object_usd \
+  ++manager_env.commands.motion.motion_lib_cfg.bps_dir=/root/GRAIL/data/motion_lib/selected_robocasa_pickup_table_4_g1/bps
+```
+
 ## Documentation
 
 Full documentation can be found at [docs](https://nvlabs.github.io/GRAIL/)

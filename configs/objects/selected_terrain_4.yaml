@@ -1,0 +1,14 @@
+dataset: Terrain
+objects:
+  curb_000:
+    obj_scale: [0.6, 0.6, 0.6]
+    scene: indoor1-terrain-curb
+  curb_001:
+    obj_scale: [0.6, 0.6, 0.6]
+    scene: indoor1-terrain-curb
+  slope_000:
+    obj_scale: [0.6, 0.6, 0.6]
+    scene: indoor1-terrain-slope
+  slope_001:
+    obj_scale: [0.6, 0.6, 0.6]
+    scene: indoor1-terrain-slope

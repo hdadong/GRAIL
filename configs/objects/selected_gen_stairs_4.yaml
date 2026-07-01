@@ -1,0 +1,14 @@
+dataset: gen_stairs
+objects:
+  straight_aged_brick_stairs_with_8_steps_no_handrails_no_turns:
+    obj_scale: [1.0, 1.0, 1.0]
+    scene: indoor1-gen-stairs
+  straight_aged_concrete_stairs_with_12_steps_no_handrails_no_turns:
+    obj_scale: [1.0, 1.0, 1.0]
+    scene: indoor1-gen-stairs
+  straight_aged_concrete_stairs_with_5_steps_no_handrails_no_turns:
+    obj_scale: [1.0, 1.0, 1.0]
+    scene: indoor1-gen-stairs
+  straight_aged_concrete_stairs_with_7_steps_no_handrails_no_turns:
+    obj_scale: [1.0, 1.0, 1.0]
+    scene: indoor1-gen-stairs
