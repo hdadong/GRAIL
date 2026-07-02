@@ -10,23 +10,31 @@ The repo ships three conda envs:
 
 ## Docker (Recommended)
 
-The Docker image ships pre-installed system dependencies, CUDA 12.8, and the `grail` + `hunyuan` conda envs (Python deps, PyTorch, PyTorch3D, detectron2, CUDA extensions). You only need to bind-mount your repo and run the lightweight setup script to download Blender:
+The Docker image ships pre-installed system dependencies, CUDA 12.8, and the `grail` + `hunyuan` conda envs (Python deps, PyTorch, PyTorch3D, detectron2, CUDA extensions). Bind-mount your repo and run the lightweight setup script to validate GPU/Python-specific native extensions and download Blender:
 
 ```bash
+git clone https://github.com/NVlabs/GRAIL.git
+cd GRAIL
+git submodule update --init --recursive
+
 docker pull docker.io/nvgrail/grail:latest
 docker run --gpus all -it --shm-size=16g \
-    -v /path/to/grail:/workspace/grail \
+    -v "$PWD":/workspace/grail \
     docker.io/nvgrail/grail:latest
 
 # Inside the container
 cd /workspace/grail
-bash scripts/setup/install_env_docker.sh   # downloads Blender (~6.4GB)
+bash scripts/setup/install_env_docker.sh   # validates native extensions, downloads Blender (~6.4GB)
 bash scripts/setup/download_checkpoints.sh # model checkpoints
 bash scripts/setup/download_comasset.sh    # datasets (optional)
+source /root/miniconda3/etc/profile.d/conda.sh
 conda activate grail
+[ -f .env ] && source .env
 ```
 
-The image does not ship the `sonic` env. If you need retargeting or training, run `bash scripts/setup/install_env_sonic.sh` inside the container to install it on top (~20 GB extra).
+The setup script rebuilds GPU/Python-specific native extensions when needed
+(`nvdiffrast`, FoundationPose `mycpp`) and installs Blender into the mounted
+checkout.
 
 ## Install from Scratch
 
