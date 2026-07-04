@@ -53,22 +53,32 @@
 
 ## Quick Start
 
-**Pull the docker image** and install local extras (Blender, checkpoints) inside it:
+**Pull the docker image** and install local extras inside the bind-mounted checkout:
 
 ```bash
+git clone https://github.com/NVlabs/GRAIL.git
+cd GRAIL
+git submodule update --init --recursive
+
 docker pull docker.io/nvgrail/grail:latest
 
 docker run --gpus all -it --shm-size=16g \
-    -v /path/to/grail:/workspace/grail \
+    -v "$PWD":/workspace/grail \
     docker.io/nvgrail/grail:latest
 
 # inside the container
 cd /workspace/grail
-bash scripts/setup/install_env_docker.sh   # downloads Blender
+bash scripts/setup/install_env_docker.sh   # validates native extensions, downloads Blender
 bash scripts/setup/download_checkpoints.sh # GEM-SMPL / GEM-SOMA / FoundationPose weights
+bash scripts/setup/download_comasset.sh --category cordless_drill # quick-start object
+source /root/miniconda3/etc/profile.d/conda.sh
 conda activate grail
-source .env                                 # OPENAI_API_KEY, KLING_*, HF_TOKEN
+[ -f .env ] && source .env                  # OPENAI_API_KEY, KLING_*, HF_TOKEN
 ```
+
+The setup script rebuilds GPU/Python-specific native extensions when needed
+(`nvdiffrast`, FoundationPose `mycpp`) and installs Blender into the mounted
+checkout.
 
 Run any stage end-to-end. Pipeline stages are package entrypoints; invoke them
 with `python -m grail.pipelines.*` rather than project-root wrapper scripts.
