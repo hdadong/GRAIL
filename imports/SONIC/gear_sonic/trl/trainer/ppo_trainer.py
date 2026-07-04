@@ -761,6 +761,11 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.compute_imgaug_bc_loss = self.config.get("compute_imgaug_bc_loss", False)
         self.imgaug_bc_loss_coef = self.config.get("imgaug_bc_loss_coef", 1.0)
         self.imgaug_bc_loss_fn = torch.nn.MSELoss()
+        self.distill_teacher_loss_coef = self.config.get("distill_teacher_loss_coef", 0.0)
+        self.compute_distill_teacher_loss = (
+            self.distill_teacher_loss_coef > 0.0 and self.ref_model is not None
+        )
+        self.distill_teacher_loss_fn = torch.nn.MSELoss()
 
     def _setup_storage(self):
         """Allocate rollout storage buffers and episode tracking accumulators.
@@ -1108,6 +1113,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         if self.compute_imgaug_bc_loss:
             imgaug_bc_loss_stats = torch.zeros(stats_shape, device=device)
             weighted_imgaug_bc_loss_stats = torch.zeros(stats_shape, device=device)
+        if self.compute_distill_teacher_loss:
+            distill_teacher_loss_stats = torch.zeros(stats_shape, device=device)
+            weighted_distill_teacher_loss_stats = torch.zeros(stats_shape, device=device)
 
         self.approxkl_stats = approxkl_stats
         self.pg_clipfrac_stats = pg_clipfrac_stats
@@ -1132,6 +1140,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         if self.compute_imgaug_bc_loss:
             self.imgaug_bc_loss_stats = imgaug_bc_loss_stats
             self.weighted_imgaug_bc_loss_stats = weighted_imgaug_bc_loss_stats
+        if self.compute_distill_teacher_loss:
+            self.distill_teacher_loss_stats = distill_teacher_loss_stats
+            self.weighted_distill_teacher_loss_stats = weighted_distill_teacher_loss_stats
 
     def _get_rollout_data(self, obs_keys):
         """Transpose storage from ``(steps, envs, ...)`` to ``(envs, steps, ...)`` and apply augmentations.
@@ -1311,10 +1322,18 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     },
                 )
                 policy_results = results["policy"]
-        return {
+        ret = {
             "policy_results": policy_results,
             "value_results": results["value"],
         }
+        if self.compute_distill_teacher_loss:
+            self.ref_model.eval()
+            with torch.no_grad():
+                teacher_results = self.ref_model.act(
+                    obs_dict=mb_obs_dict, episode_attnmask=episode_attnmask
+                )
+            ret["teacher_results"] = teacher_results
+        return ret
 
     def _compute_loss(self, forward_results, mb_rollout_data):
         """Compute the total loss as a weighted sum of PPO and optional auxiliary losses.
@@ -1340,9 +1359,27 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             loss += imgaug_bc_loss_dict["imgaug_bc_loss"] * self.config.imgaug_bc_loss_coef
             ret_dict["imgaug_bc_loss_dict"] = imgaug_bc_loss_dict
 
+        if self.compute_distill_teacher_loss:
+            distill_teacher_loss_dict = self._compute_distill_teacher_loss(
+                forward_results, mb_rollout_data
+            )
+            loss += (
+                distill_teacher_loss_dict["distill_teacher_loss"]
+                * self.distill_teacher_loss_coef
+            )
+            ret_dict["distill_teacher_loss_dict"] = distill_teacher_loss_dict
+
         ret_dict["loss"] = loss
 
         return ret_dict
+
+    def _compute_distill_teacher_loss(self, forward_results, mb_rollout_data):  # noqa: ARG002
+        """Compute behavior-cloning loss from a frozen teacher policy."""
+        student_mean = forward_results["policy_results"]["action_mean"]
+        teacher_mean = forward_results["teacher_results"]["action_mean"].detach()
+        return {
+            "distill_teacher_loss": self.distill_teacher_loss_fn(student_mean, teacher_mean),
+        }
 
     def _compute_ppo_loss(self, forward_results, mb_rollout_data):
         """Compute the clipped PPO surrogate loss, value loss, and entropy bonus.
@@ -1556,6 +1593,16 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self.weighted_imgaug_bc_loss_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = (
                 self.config.imgaug_bc_loss_coef * imgaug_bc_loss
             )
+        if self.compute_distill_teacher_loss:
+            distill_teacher_loss = loss_dict["distill_teacher_loss_dict"][
+                "distill_teacher_loss"
+            ]
+            self.distill_teacher_loss_stats[
+                ppo_epoch_idx, minibatch_idx, microbatch_idx
+            ] = distill_teacher_loss
+            self.weighted_distill_teacher_loss_stats[
+                ppo_epoch_idx, minibatch_idx, microbatch_idx
+            ] = self.distill_teacher_loss_coef * distill_teacher_loss
         if self.use_symmetry:
             self.actor_sym_loss_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = loss_dict[
                 "ppo_loss_dict"
@@ -1606,6 +1653,15 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             )
             metrics["loss/weighted_imgaug_bc_avg"] = (
                 self.accelerator.gather_for_metrics(self.weighted_imgaug_bc_loss_stats)
+                .mean()
+                .item()
+            )
+        if self.compute_distill_teacher_loss:
+            metrics["loss/distill_teacher_avg"] = (
+                self.accelerator.gather_for_metrics(self.distill_teacher_loss_stats).mean().item()
+            )
+            metrics["loss/weighted_distill_teacher_avg"] = (
+                self.accelerator.gather_for_metrics(self.weighted_distill_teacher_loss_stats)
                 .mean()
                 .item()
             )

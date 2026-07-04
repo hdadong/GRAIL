@@ -1,0 +1,4 @@
+defaults:
+  - ../terms/camera_rgb@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.observations.CameraRGBCfg

@@ -1,0 +1,42 @@
+# @package _global_
+
+algo:
+  config:
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_key: actor_obs
+      input_obs_dict: true
+      output_original_obs_dict: true
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.MultiModalCNNMLP
+        process_output_dim: true
+        module_config_dict:
+          image_key: camera_rgb
+          proprio_key: actor_obs
+          output_dim: [robot_action_dim]
+          image_shape: [108, 192, 3]
+          image_encoder_type: ResNet
+          resnet_type: resnet18
+          pretrained: true
+          trainable: true
+          image_feature_dim: 128
+          proprio_feature_dim: 256
+          proprio_hidden_dims: [512, 256]
+          fusion_hidden_dims: [512, 256, 128]
+          activation: SiLU
+
+    critic:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Critic
+      running_mean_std: false
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModule
+        process_output_dim: true
+        module_config_dict:
+          type: MLP
+          input_dim: [critic_obs]
+          output_dim: [1]
+          layer_config:
+            type: MLP
+            hidden_dims: [512, 256, 128]
+            activation: SiLU

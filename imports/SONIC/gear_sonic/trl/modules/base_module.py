@@ -2,6 +2,7 @@
 
 import inspect
 
+import torch
 import torch.nn as nn
 import torchvision.models as models
 
@@ -322,34 +323,39 @@ class BaseModule(nn.Module):
         channel_dims = layer_config["channel_dims"]
         activation = getattr(nn, layer_config["activation"])()
 
-        # Get input dimensions from env_config camera settings
-        camera_config = self.env_config.simulator.config.cameras
-        input_height = camera_config.camera_resolutions[0]
-        input_width = camera_config.camera_resolutions[1]
+        input_shape = layer_config.get("input_shape", None)
+        input_obs_key = self.module_config_dict["input_dim"][0]
+        if input_shape is not None:
+            input_height, input_width, input_channels = input_shape
+        elif input_obs_key == "camera_rgb":
+            input_height, input_width = self.env_config.get("camera_resolution", [144, 256])
+            input_channels = 3
+        else:
+            # Get input dimensions from env_config camera settings
+            camera_config = self.env_config.simulator.config.cameras
+            input_height = camera_config.camera_resolutions[0]
+            input_width = camera_config.camera_resolutions[1]
 
-        # Determine number of channels from camera types
-        input_channels = 0
-        for camera_type in camera_config.camera_types:
-            if camera_type.get("rgb", False):
-                input_channels += 3
-            if camera_type.get("depth", False):
-                input_channels += 1
+            # Determine number of channels from camera types
+            input_channels = 0
+            for camera_type in camera_config.camera_types:
+                if camera_type.get("rgb", False):
+                    input_channels += 3
+                if camera_type.get("depth", False):
+                    input_channels += 1
 
-        # If no channels found, default to 1
-        if input_channels == 0:
-            input_channels = 1
+            # If no channels found, default to 1
+            if input_channels == 0:
+                input_channels = 1
 
-        vision_obs_dim = [input_width, input_height, input_channels]
+        vision_obs_dim = [input_height, input_width, input_channels]
         print("vision_obs_dim", vision_obs_dim)
-        assert (
-            vision_obs_dim[0] * vision_obs_dim[1] * vision_obs_dim[2]
-            == self.obs_dim_dict["vision_obs"]
-        )
-        if len(vision_obs_dim) != 3:
+        flat_dim = input_height * input_width * input_channels
+        if flat_dim != self.obs_dim_dict[input_obs_key]:
             raise ValueError(
-                f"vision_obs dimension should be (width, height, channels), got {vision_obs_dim}"
+                f"{input_obs_key} dimension mismatch: expected {flat_dim} from "
+                f"{vision_obs_dim}, got {self.obs_dim_dict[input_obs_key]}"
             )
-        input_width, input_height, input_channels = vision_obs_dim
 
         # Get layer configurations
         layer_configs = layer_config.get("layers", [])
@@ -552,7 +558,18 @@ class BaseModule(nn.Module):
             input = input[input_obs_key]
         if self.num_input_temporal_dims is not None:
             input = input.view(*input.shape[:-2], self.input_dim)
+        vision_prefix_shape = None
+        if self.module_config_dict["layer_config"]["type"] in ["CNN", "ResNet"]:
+            if input.ndim == 5:
+                # Rollout/training stores images as channels-last [B, T, H, W, C].
+                vision_prefix_shape = input.shape[:-3]
+                input = input.reshape(-1, *input.shape[-3:])
+            if input.ndim == 4:
+                # IsaacLab camera observations are channels-last [B, H, W, C].
+                input = input.permute(0, 3, 1, 2).contiguous()
         output = self.module(input)
+        if vision_prefix_shape is not None:
+            output = output.view(*vision_prefix_shape, -1)
         if self.num_output_temporal_dims is not None:
             output = output.view(
                 *output.shape[:-1],
@@ -560,6 +577,183 @@ class BaseModule(nn.Module):
                 self.output_dim // self.num_output_temporal_dims,
             )
         return output
+
+
+class MultiModalCNNMLP(nn.Module):
+    """Fuse ego RGB with proprioceptive state and output meta-actions."""
+
+    def __init__(
+        self,
+        obs_dim_dict=None,
+        module_config_dict=None,
+        module_dim_dict={},  # noqa: B006
+        env_config=None,
+        algo_config=None,  # noqa: ARG002
+        process_output_dim=False,
+        **kwargs,  # noqa: ARG002
+    ):
+        super().__init__()
+        self.env_config = env_config
+        if obs_dim_dict is None and env_config is not None:
+            obs_dim_dict = env_config.robot.algo_obs_dim_dict
+        self.obs_dim_dict = obs_dim_dict
+        self.module_config_dict = module_config_dict
+        self.module_dim_dict = module_dim_dict
+
+        self.image_key = module_config_dict.get("image_key", "camera_rgb")
+        self.proprio_key = module_config_dict.get("proprio_key", "actor_obs")
+        self.image_shape = module_config_dict.get("image_shape", [96, 160, 3])
+        self.image_feature_dim = int(module_config_dict.get("image_feature_dim", 256))
+        self.proprio_feature_dim = int(module_config_dict.get("proprio_feature_dim", 256))
+
+        output_dim_cfg = module_config_dict["output_dim"]
+        if isinstance(output_dim_cfg, int):
+            self.output_dim = output_dim_cfg
+        else:
+            self.output_dim = 0
+            for item in output_dim_cfg:
+                if item == "robot_action_dim" and process_output_dim:
+                    self.output_dim += env_config.robot.actions_dim
+                elif isinstance(item, int | float):
+                    self.output_dim += int(item)
+                elif item in module_dim_dict:
+                    self.output_dim += module_dim_dict[item]
+                else:
+                    raise ValueError(f"Unknown output type for MultiModalCNNMLP: {item}")
+
+        image_h, image_w, image_c = self.image_shape
+        expected_image_dim = image_h * image_w * image_c
+        if self.image_key not in self.obs_dim_dict:
+            raise ValueError(f"Missing image obs key: {self.image_key}")
+        if self.proprio_key not in self.obs_dim_dict:
+            raise ValueError(f"Missing proprio obs key: {self.proprio_key}")
+        if self.obs_dim_dict[self.image_key] != expected_image_dim:
+            raise ValueError(
+                f"{self.image_key} dimension mismatch: expected {expected_image_dim} "
+                f"from {self.image_shape}, got {self.obs_dim_dict[self.image_key]}"
+            )
+
+        self.image_encoder = self._build_image_encoder(module_config_dict)
+        self.proprio_encoder = self._build_mlp(
+            input_dim=self.obs_dim_dict[self.proprio_key],
+            hidden_dims=module_config_dict.get("proprio_hidden_dims", [512, 256]),
+            output_dim=self.proprio_feature_dim,
+            activation_name=module_config_dict.get("activation", "SiLU"),
+        )
+        self.fusion = self._build_mlp(
+            input_dim=self.image_feature_dim + self.proprio_feature_dim,
+            hidden_dims=module_config_dict.get("fusion_hidden_dims", [512, 256, 128]),
+            output_dim=self.output_dim,
+            activation_name=module_config_dict.get("activation", "SiLU"),
+        )
+
+    @staticmethod
+    def _build_mlp(input_dim, hidden_dims, output_dim, activation_name):
+        layers = []
+        activation_cls = getattr(nn, activation_name)
+        last_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(last_dim, hidden_dim))
+            layers.append(activation_cls())
+            last_dim = hidden_dim
+        layers.append(nn.Linear(last_dim, output_dim))
+        return nn.Sequential(*layers)
+
+    def _build_image_encoder(self, module_config_dict):
+        if module_config_dict.get("image_encoder_type", "CNN") == "ResNet":
+            resnet_type = module_config_dict.get("resnet_type", "resnet18")
+            pretrained = module_config_dict.get("pretrained", True)
+            trainable = module_config_dict.get("trainable", True)
+            if resnet_type == "resnet18":
+                resnet = models.resnet18(pretrained=pretrained)
+                resnet_feature_dim = 512
+            elif resnet_type == "resnet34":
+                resnet = models.resnet34(pretrained=pretrained)
+                resnet_feature_dim = 512
+            elif resnet_type == "resnet50":
+                resnet = models.resnet50(pretrained=pretrained)
+                resnet_feature_dim = 2048
+            else:
+                raise ValueError(f"Unsupported ResNet type: {resnet_type}")
+            resnet_features = nn.Sequential(*list(resnet.children())[:-2])
+            if not trainable:
+                for param in resnet_features.parameters():
+                    param.requires_grad = False
+            return nn.Sequential(
+                resnet_features,
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(resnet_feature_dim, self.image_feature_dim),
+                getattr(nn, module_config_dict.get("activation", "SiLU"))(),
+            )
+
+        image_h, image_w, image_c = self.image_shape
+        current_h, current_w, current_c = image_h, image_w, image_c
+        channel_dims = module_config_dict.get("image_channel_dims", [16, 32, 64, 96])
+        layer_configs = module_config_dict.get(
+            "image_layers",
+            [
+                {"type": "conv", "kernel_size": 5, "stride": 2, "padding": 2},
+                {"type": "conv", "kernel_size": 3, "stride": 2, "padding": 1},
+                {"type": "conv", "kernel_size": 3, "stride": 2, "padding": 1},
+                {"type": "conv", "kernel_size": 3, "stride": 2, "padding": 1},
+            ],
+        )
+        activation_cls = getattr(nn, module_config_dict.get("activation", "SiLU"))
+        layers = []
+        conv_idx = 0
+        for layer_cfg in layer_configs:
+            if layer_cfg["type"] != "conv":
+                raise ValueError(f"Unsupported image layer type: {layer_cfg['type']}")
+            kernel_size = layer_cfg.get("kernel_size", 3)
+            stride = layer_cfg.get("stride", 1)
+            padding = layer_cfg.get("padding", 1)
+            out_channels = channel_dims[conv_idx]
+            layers.append(
+                nn.Conv2d(
+                    current_c,
+                    out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                )
+            )
+            layers.append(activation_cls())
+            current_c = out_channels
+            current_h = (current_h - kernel_size + 2 * padding) // stride + 1
+            current_w = (current_w - kernel_size + 2 * padding) // stride + 1
+            conv_idx += 1
+        layers.append(nn.Flatten())
+        layers.append(nn.Linear(current_c * current_h * current_w, self.image_feature_dim))
+        layers.append(activation_cls())
+        return nn.Sequential(*layers)
+
+    @staticmethod
+    def _flatten_prefix(tensor, feature_ndim):
+        prefix_shape = tensor.shape[:-feature_ndim]
+        return tensor.reshape(-1, *tensor.shape[-feature_ndim:]), prefix_shape
+
+    def forward(self, input, **kwargs):  # noqa: ARG002
+        if not hasattr(input, "__getitem__"):
+            raise TypeError("MultiModalCNNMLP expects an obs_dict-like input")
+
+        image = input[self.image_key]
+        proprio = input[self.proprio_key]
+
+        if image.ndim not in (4, 5):
+            raise ValueError(f"{self.image_key} must be [B,H,W,C] or [B,T,H,W,C], got {image.shape}")
+        image_flat, prefix_shape = self._flatten_prefix(image, 3)
+        image_flat = image_flat.permute(0, 3, 1, 2).contiguous()
+
+        if proprio.shape[:-1] != prefix_shape:
+            proprio = proprio.reshape(*prefix_shape, -1)
+        proprio_flat = proprio.reshape(-1, proprio.shape[-1])
+
+        image_feat = self.image_encoder(image_flat)
+        proprio_feat = self.proprio_encoder(proprio_flat)
+        fused = torch.cat([image_feat, proprio_feat], dim=-1)
+        output = self.fusion(fused)
+        return output.reshape(*prefix_shape, -1)
 
 
 class BaseModuleAux(BaseModule):

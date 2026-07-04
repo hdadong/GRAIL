@@ -1,0 +1,154 @@
+# @package _global_
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - /manager_env/observations/camera_rgb: base
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: camera_cnn_distill
+  - override /manager_env/observations/policy: hoi_manip/grab_43dof_policy_mf_delta_bps
+  - override /manager_env/observations/critic: hoi_manip/grab_43dof_critic_mf_delta
+  - override /manager_env/observations/policy_atm: proprio_hist
+  - override /manager_env/observations/tokenizer: unitoken_all_noz_heading
+  - override /manager_env/rewards: hoi_manip/grab_rewards_no_lift_ucw
+  - override /manager_env/events: tracking/no_dr
+  - override /manager_env/terminations: tracking/hoi_grab_no_lift
+  - _self_
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+exp_var: robocasa_ego_distill
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 1024
+project_name: GRAB_Tracking
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  config:
+    safe_nan: true
+    gpu_collision_stack_size_exp: 30
+    robot:
+      type: g1_43dof
+    terrain_type: plane
+    env_spacing: 10.0
+    eval_camera_offset: [2, -2, 1]
+    replicate_physics: false
+    enable_cameras: true
+    camera_resolution: [108, 192]
+    cameras:
+      camera_resolution: [108, 192]
+      camera_attached_link: torso_link
+      # Equivalent to GR00T-VisualSim2Real's torso->d435_link mount plus D435 camera offset,
+      # without adding a new MJCF body that would change motion-lib skeleton/body ordering.
+      camera_pos_offset: [0.0576235, 0.05253, 0.41987]
+      camera_rot_offset: [0.9024433930625543, 0.0, 0.43080837368602093, 0.0]
+      camera_yaw_only: true
+      camera_data_types: [rgb]
+      camera_focal_length: 1.88
+      camera_focus_distance: 0.5
+      camera_horizontal_aperture: 2.6035
+      camera_vertical_aperture: 1.4621
+      camera_clipping_range: [0.1, 20.0]
+    add_object: true
+    object_is_dynamic: true
+    add_table: true
+    object_mass: 0.1
+    lift_contact_force_threshold: 0.1
+    scene_scale: null
+    table_size: [2.0, 0.6, 0.04]
+    use_motion_hand_actions: true
+    use_finger_primitive: true
+    motion_meta_info_path: null
+    contact_sensor_finger_links:
+      - right_hand_palm_link
+      - right_hand_thumb_0_link
+      - right_hand_thumb_1_link
+      - right_hand_thumb_2_link
+      - right_hand_index_0_link
+      - right_hand_index_1_link
+      - right_hand_middle_0_link
+      - right_hand_middle_1_link
+    train_only_events:
+      - push_robot
+      - force_push_robot
+    use_latent_residual: true
+    latent_residual_mode: pre_quantization
+    latent_residual_scale: 0.1
+    meta_action_dim: 66
+    tokenizer_action_dim: 64
+    hand_action_dim: 2
+    finger_primitive:
+      primitive_action_map:
+        left:
+          dof_names: [left_hand_index_0_joint, left_hand_index_1_joint, left_hand_middle_0_joint, left_hand_middle_1_joint, left_hand_thumb_0_joint, left_hand_thumb_1_joint, left_hand_thumb_2_joint]
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [-1.42857143, -2.14285714, -1.42857143, -2.14285714, 0.0, 1.0, 1.0]
+          discrete: true
+        right:
+          dof_names: [right_hand_index_0_joint, right_hand_index_1_joint, right_hand_middle_0_joint, right_hand_middle_1_joint, right_hand_thumb_0_joint, right_hand_thumb_1_joint, right_hand_thumb_2_joint]
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [1.42857143, 2.14285714, 1.42857143, 2.14285714, 0.0, -1.0, -1.0]
+          discrete: true
+    action_transform_module_cfg: models/sonic_manipulation_base/model_config.yaml
+    action_transform_module_checkpoint: models/sonic_manipulation_base/last.pt
+    use_staged_wrapper: false
+  commands:
+    motion:
+      motion_lib_num_dof: 29
+      hand_default_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      debug_vis: false
+      use_paired_motions: true
+      start_from_first_frame: false
+      sample_before_contact: true
+      sample_from_n_initial_frames: 30
+      object_position_randomize: false
+      encoder_sample_probs:
+        g1: 1.0
+        teleop: 0.0
+        smpl: 0.0
+
+algo:
+  config:
+    num_steps_per_env: 16
+    num_learning_iterations: 30000
+    num_learning_epochs: 3
+    num_mini_batches: 4
+    actor_learning_rate: 2e-4
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 1.0
+    use_dagger: true
+    teacher_input_key: actor_obs
+    teacher_checkpoint: null
+    teacher_actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      output_original_obs_dict: true
+      has_aux_loss: true
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModuleAux
+        process_output_dim: true
+        aux_loss_func:
+          latent_l2:
+            _target_: gear_sonic.trl.losses.token_losses.LatentL2Loss
+            latent_dim: 64
+        aux_loss_coef:
+          latent_l2: 0.01
+        module_config_dict:
+          input_dim: [actor_obs]
+          output_dim: [robot_action_dim]
+          layer_config:
+            type: MLP
+            hidden_dims: [512, 256, 128]
+            activation: SiLU

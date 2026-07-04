@@ -479,7 +479,26 @@ def main(config: OmegaConf):
 
     _train_breadcrumb(config, "main: before materialize_lazy_params")
     materialize_lazy_params(policy, env)
+    if ref_model is not None:
+        materialize_lazy_params(ref_model, env)
     _train_breadcrumb(config, "main: after materialize_lazy_params")
+
+    if ref_model is not None and config.algo.config.get("teacher_checkpoint", None) is not None:
+        teacher_checkpoint = config.algo.config.teacher_checkpoint
+        teacher_ckpt = torch.load(teacher_checkpoint, map_location=device, weights_only=False)
+        if "actor_model_state_dict" in teacher_ckpt:
+            teacher_state_dict = teacher_ckpt["actor_model_state_dict"]
+        elif "policy_state_dict" in teacher_ckpt:
+            teacher_state_dict = teacher_ckpt["policy_state_dict"]
+        else:
+            raise KeyError(
+                f"No actor_model_state_dict or policy_state_dict in {teacher_checkpoint}"
+            )
+        ref_model.load_state_dict(teacher_state_dict, strict=True)
+        logger.info(f"Loaded teacher checkpoint from {teacher_checkpoint} with strict=True")
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        ref_model.eval()
 
     if config.algo.config.get("pretrained_model", None) is not None:
         pretrained_cfg = config.algo.config.pretrained_model

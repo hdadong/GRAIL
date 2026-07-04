@@ -585,6 +585,7 @@ def main(override_config: omegaconf.OmegaConf):
     for callback_name, callback in callbacks.items():  # noqa: B007
         callback.on_step_end(args, state, None, env=env, model=model, accelerator=accelerator)
 
+    camera_rgb_writer = None
     if config.get("run_eval_loop", True):
         env.set_is_evaluating(True)
         obs_dict = env.reset_all()
@@ -602,6 +603,84 @@ def main(override_config: omegaconf.OmegaConf):
 
         step_count = 0
         max_render_steps = config.get("max_render_steps", 0)
+        capture_camera_rgb_path = config.get("capture_camera_rgb_path", None)
+        capture_camera_rgb_source = config.get("capture_camera_rgb_source", "obs")
+        capture_camera_rgb_max_frames = int(config.get("capture_camera_rgb_max_frames", 0) or 0)
+        capture_camera_rgb_unnormalize = bool(config.get("capture_camera_rgb_unnormalize", True))
+        camera_rgb_frames = 0
+        if capture_camera_rgb_path is not None and accelerator.is_main_process:
+            import imageio.v2 as imageio
+            import numpy as np
+
+            Path(capture_camera_rgb_path).parent.mkdir(parents=True, exist_ok=True)
+            step_dt = getattr(env, "step_dt", None)
+            if step_dt is None and hasattr(env, "env"):
+                step_dt = getattr(env.env, "step_dt", None)
+            fps = max(1, int(round(1.0 / step_dt))) if step_dt else 30
+            camera_rgb_writer = imageio.get_writer(
+                capture_camera_rgb_path,
+                fps=fps,
+                codec="libx264",
+                quality=6,
+                pixelformat="yuv420p",
+            )
+
+        def _get_raw_ego_camera_frame():
+            raw_env = getattr(env, "env", env)
+            scene = getattr(raw_env, "scene", None)
+            if scene is None:
+                return None
+            try:
+                camera = scene["ego_camera"]
+            except KeyError:
+                return None
+            frame = camera.data.output.get("rgb", None)
+            if frame is None:
+                return None
+            frame = frame[0].detach().cpu()
+            if frame.shape[-1] == 4:
+                frame = frame[..., :3]
+            return frame
+
+        def _to_uint8_rgb(frame):
+            frame_np = frame.numpy()
+            if frame_np.dtype == np.uint8:
+                return frame_np
+            if capture_camera_rgb_source == "obs" and capture_camera_rgb_unnormalize:
+                mean = np.array([0.485, 0.456, 0.406], dtype=frame_np.dtype)
+                std = np.array([0.229, 0.224, 0.225], dtype=frame_np.dtype)
+                frame_np = frame_np * std + mean
+            if frame_np.max() <= 1.0:
+                frame_np = frame_np * 255.0
+            return frame_np.clip(0, 255).astype(np.uint8)
+
+        def capture_camera_rgb(obs):
+            nonlocal camera_rgb_frames
+            if camera_rgb_writer is None:
+                return
+            if capture_camera_rgb_max_frames > 0 and camera_rgb_frames >= capture_camera_rgb_max_frames:
+                return
+
+            frame = _get_raw_ego_camera_frame() if capture_camera_rgb_source == "raw" else None
+            if frame is None:
+                if "camera_rgb" not in obs:
+                    return
+                frame = obs["camera_rgb"][0].detach().cpu()
+                while frame.ndim > 3:
+                    frame = frame[0]
+            frame_np = _to_uint8_rgb(frame)
+            if camera_rgb_frames == 0:
+                logger.info(
+                    "Captured ego camera frame source={} shape={} min={} max={} mean={:.3f}".format(
+                        capture_camera_rgb_source,
+                        tuple(frame_np.shape),
+                        int(frame_np.min()),
+                        int(frame_np.max()),
+                        float(frame_np.mean()),
+                    )
+                )
+            camera_rgb_writer.append_data(frame_np)
+            camera_rgb_frames += 1
 
         run_once = config.get("run_once", False)
         envs_completed = torch.zeros(config.num_envs, dtype=torch.bool, device=device)
@@ -614,6 +693,7 @@ def main(override_config: omegaconf.OmegaConf):
 
                 actor_state = {}
                 actions = policy_model.rollout(obs_dict=obs_dict)
+                capture_camera_rgb(obs_dict)
                 actor_state["actions"] = policy_model.action_mean.detach()
                 actor_state["obs_dict"] = actions["obs_dict"]
 
@@ -632,7 +712,6 @@ def main(override_config: omegaconf.OmegaConf):
                     results[2],
                     results[3],
                 )  # noqa: F841
-
                 if eval_step_callbacks:
                     all_want_exit = all(
                         cb.eval_step(env, results) for cb in eval_step_callbacks.values()
@@ -655,6 +734,9 @@ def main(override_config: omegaconf.OmegaConf):
 
                 for obs_key in obs_dict.keys():  # noqa: SIM118
                     obs_dict[obs_key] = obs_dict[obs_key].to(device)
+
+    if camera_rgb_writer is not None:
+        camera_rgb_writer.close()
 
     if simulator_type == "IsaacSim":
         os._exit(0)
