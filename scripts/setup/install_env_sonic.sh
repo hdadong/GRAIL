@@ -161,7 +161,10 @@ echo ">>> Linked ${GEAR_SONIC}/{data/motion_lib_genhoi,models} -> repo root"
 
 # --- Step 3: editable installs ------------------------------------------
 echo ">>> pip install -e imports/GMR"
-pip install -e "${GMR_DIR}"
+# --no-deps: GMR's unpinned runtime deps can resolve opencv-python/numpy to
+# versions that conflict with Isaac Sim/Lab and gear_sonic. The needed
+# retargeting deps are installed explicitly below.
+pip install --no-deps -e "${GMR_DIR}"
 
 echo ">>> pip install -e imports/SONIC/gear_sonic[training] + huggingface_hub"
 pip install -e "${GEAR_SONIC}[training]"
@@ -196,12 +199,17 @@ pip install \
 # Without it, eval `python eval_agent_trl.py` crashes at metrics computation
 # and no rendered videos get uploaded to wandb.
 #
-# Sourced from ZhengyiLuo's SMPLSim repo. Its non-trivial deps (numpy-stl, vtk,
-# easydict, gymnasium, mediapy, torchgeometry) aren't pulled in by
-# pip-from-git automatically because the package's setup.py doesn't always
-# install_requires them — list them explicitly.
+# Sourced from ZhengyiLuo's SMPLSim repo. Install its support packages
+# explicitly, then install SMPLSim itself with --no-deps. Letting pip resolve
+# SMPLSim dependencies upgrades numpy/packaging/psutil to versions that break
+# Isaac Sim/Lab and gear_sonic.
 pip install \
-    numpy-stl easydict gymnasium mediapy torchgeometry vtk \
+    'numpy==1.26.4' \
+    'packaging==23.0' \
+    'psutil==5.9.8' \
+    'typing_extensions==4.12.2' \
+    numpy-stl easydict gymnasium mediapy torchgeometry vtk
+pip install --no-deps \
     'smpl_sim @ git+https://github.com/ZhengyiLuo/SMPLSim.git'
 
 # --- Step 6: git-lfs pull for SONIC assets ------------------------------

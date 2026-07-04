@@ -8,6 +8,7 @@ Reuses `demo_slam.py` from GEM-SMPL for preprocessing and data loading.
 """
 
 import os
+import subprocess
 import sys
 import time
 import types
@@ -122,14 +123,27 @@ def infer_human_pose(video_path, cache_dir, is_static_cam=False, verbose=False):
         not Path(cfg.video_path).exists()
         or get_video_lwh(video_path_obj)[0] != get_video_lwh(cfg.video_path)[0]
     ):
-        from tqdm import tqdm
-
-        reader = get_video_reader(video_path_obj)
-        writer = get_writer(cfg.video_path, fps=30, crf=23)
-        for img in tqdm(reader, total=length, desc="[GEM-SMPL] Copy video"):
-            writer.write_frame(img)
-        writer.close()
-        reader.close()
+        # imageio/pyav 17 can expose a None time_base when writing frame-by-frame.
+        # Use ffmpeg for this copy/re-encode step to keep GEM-SMPL preprocessing stable.
+        Path(cfg.video_path).parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path_obj),
+                "-c:v",
+                "libx264",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                str(cfg.video_path),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     # GEM-SMPL code uses bare "inputs/checkpoints/..." paths from CWD,
     # so temporarily chdir to GEM-SMPL root while running its functions.
