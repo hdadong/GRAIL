@@ -586,6 +586,7 @@ def main(override_config: omegaconf.OmegaConf):
         callback.on_step_end(args, state, None, env=env, model=model, accelerator=accelerator)
 
     camera_rgb_writer = None
+    camera_output_writers = {}
     if config.get("run_eval_loop", True):
         env.set_is_evaluating(True)
         obs_dict = env.reset_all()
@@ -607,16 +608,32 @@ def main(override_config: omegaconf.OmegaConf):
         capture_camera_rgb_source = config.get("capture_camera_rgb_source", "obs")
         capture_camera_rgb_max_frames = int(config.get("capture_camera_rgb_max_frames", 0) or 0)
         capture_camera_rgb_unnormalize = bool(config.get("capture_camera_rgb_unnormalize", True))
+        capture_camera_output_dir = config.get("capture_camera_output_dir", None)
+        capture_camera_output_types = list(config.get("capture_camera_output_types", []))
+        capture_camera_output_max_frames = int(
+            config.get("capture_camera_output_max_frames", capture_camera_rgb_max_frames) or 0
+        )
+        capture_camera_output_raw_dir = config.get("capture_camera_output_raw_dir", None)
+        capture_camera_output_raw_max_frames = int(
+            config.get("capture_camera_output_raw_max_frames", capture_camera_output_max_frames) or 0
+        )
         camera_rgb_frames = 0
-        if capture_camera_rgb_path is not None and accelerator.is_main_process:
+        camera_output_frames = 0
+        camera_output_logged_keys = False
+        if (
+            capture_camera_rgb_path is not None
+            or capture_camera_output_dir is not None
+            or capture_camera_output_raw_dir is not None
+        ) and accelerator.is_main_process:
             import imageio.v2 as imageio
             import numpy as np
 
-            Path(capture_camera_rgb_path).parent.mkdir(parents=True, exist_ok=True)
             step_dt = getattr(env, "step_dt", None)
             if step_dt is None and hasattr(env, "env"):
                 step_dt = getattr(env.env, "step_dt", None)
             fps = max(1, int(round(1.0 / step_dt))) if step_dt else 30
+        if capture_camera_rgb_path is not None and accelerator.is_main_process:
+            Path(capture_camera_rgb_path).parent.mkdir(parents=True, exist_ok=True)
             camera_rgb_writer = imageio.get_writer(
                 capture_camera_rgb_path,
                 fps=fps,
@@ -624,8 +641,22 @@ def main(override_config: omegaconf.OmegaConf):
                 quality=6,
                 pixelformat="yuv420p",
             )
+        if capture_camera_output_dir is not None and accelerator.is_main_process:
+            capture_camera_output_dir = Path(capture_camera_output_dir)
+            capture_camera_output_dir.mkdir(parents=True, exist_ok=True)
+            for data_type in capture_camera_output_types:
+                camera_output_writers[data_type] = imageio.get_writer(
+                    str(capture_camera_output_dir / f"{data_type}.mp4"),
+                    fps=fps,
+                    codec="libx264",
+                    quality=6,
+                    pixelformat="yuv420p",
+                )
+        if capture_camera_output_raw_dir is not None and accelerator.is_main_process:
+            capture_camera_output_raw_dir = Path(capture_camera_output_raw_dir)
+            capture_camera_output_raw_dir.mkdir(parents=True, exist_ok=True)
 
-        def _get_raw_ego_camera_frame():
+        def _get_raw_ego_camera():
             raw_env = getattr(env, "env", env)
             scene = getattr(raw_env, "scene", None)
             if scene is None:
@@ -634,6 +665,12 @@ def main(override_config: omegaconf.OmegaConf):
                 camera = scene["ego_camera"]
             except KeyError:
                 return None
+            return camera
+
+        def _get_raw_ego_camera_frame():
+            camera = _get_raw_ego_camera()
+            if camera is None:
+                return None
             frame = camera.data.output.get("rgb", None)
             if frame is None:
                 return None
@@ -641,6 +678,13 @@ def main(override_config: omegaconf.OmegaConf):
             if frame.shape[-1] == 4:
                 frame = frame[..., :3]
             return frame
+
+        def _json_safe_camera_info(value):
+            if isinstance(value, dict):
+                return {str(key): _json_safe_camera_info(val) for key, val in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_json_safe_camera_info(item) for item in value]
+            return value
 
         def _to_uint8_rgb(frame):
             frame_np = frame.numpy()
@@ -653,6 +697,47 @@ def main(override_config: omegaconf.OmegaConf):
             if frame_np.max() <= 1.0:
                 frame_np = frame_np * 255.0
             return frame_np.clip(0, 255).astype(np.uint8)
+
+        def _to_uint8_camera_output(data_type, frame):
+            frame_np = frame.detach().cpu().numpy() if hasattr(frame, "detach") else np.asarray(frame)
+            while frame_np.ndim > 3:
+                frame_np = frame_np[0]
+            if frame_np.ndim == 3 and frame_np.shape[-1] == 1:
+                frame_np = frame_np[..., 0]
+            if frame_np.ndim == 3 and frame_np.shape[-1] >= 3:
+                if frame_np.shape[-1] == 4:
+                    frame_np = frame_np[..., :3]
+                if frame_np.dtype != np.uint8:
+                    if frame_np.max() <= 1.0:
+                        frame_np = frame_np * 255.0
+                    frame_np = frame_np.clip(0, 255).astype(np.uint8)
+                return frame_np
+
+            if data_type in ("semantic_segmentation", "instance_segmentation_fast", "instance_id_segmentation_fast"):
+                labels = frame_np.astype(np.int64)
+                labels = np.nan_to_num(labels, nan=0).astype(np.int64)
+                rgb = np.zeros((*labels.shape, 3), dtype=np.uint8)
+                positive = labels > 0
+                rgb[..., 0] = ((labels * 37) % 255).astype(np.uint8)
+                rgb[..., 1] = ((labels * 67) % 255).astype(np.uint8)
+                rgb[..., 2] = ((labels * 97) % 255).astype(np.uint8)
+                rgb[~positive] = 0
+                return rgb
+
+            values = frame_np.astype(np.float32)
+            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+            finite = np.isfinite(values)
+            valid = values[finite]
+            if valid.size == 0:
+                norm = np.zeros_like(values, dtype=np.uint8)
+            else:
+                v_min = float(valid.min())
+                v_max = float(valid.max())
+                if v_max <= v_min:
+                    norm = np.zeros_like(values, dtype=np.uint8)
+                else:
+                    norm = ((values - v_min) / (v_max - v_min) * 255.0).clip(0, 255).astype(np.uint8)
+            return np.repeat(norm[..., None], 3, axis=-1)
 
         def capture_camera_rgb(obs):
             nonlocal camera_rgb_frames
@@ -682,6 +767,57 @@ def main(override_config: omegaconf.OmegaConf):
             camera_rgb_writer.append_data(frame_np)
             camera_rgb_frames += 1
 
+        def capture_camera_outputs():
+            nonlocal camera_output_frames, camera_output_logged_keys
+            if not camera_output_writers and capture_camera_output_raw_dir is None:
+                return
+            if capture_camera_output_max_frames > 0 and camera_output_frames >= capture_camera_output_max_frames:
+                return
+            camera = _get_raw_ego_camera()
+            if camera is None:
+                return
+            if not camera_output_logged_keys:
+                logger.info(f"Raw ego camera output keys: {list(camera.data.output.keys())}")
+                if capture_camera_output_raw_dir is not None:
+                    info_path = capture_camera_output_raw_dir / "camera_data_info.json"
+                    with open(info_path, "w", encoding="utf-8") as info_file:
+                        json.dump(_json_safe_camera_info(camera.data.info), info_file, indent=2, default=str)
+                camera_output_logged_keys = True
+            for data_type in capture_camera_output_types:
+                frame = camera.data.output.get(data_type, None)
+                if frame is None and data_type == "depth":
+                    frame = camera.data.output.get("distance_to_image_plane", None)
+                if frame is None:
+                    continue
+                if (
+                    capture_camera_output_raw_dir is not None
+                    and (
+                        capture_camera_output_raw_max_frames <= 0
+                        or camera_output_frames < capture_camera_output_raw_max_frames
+                    )
+                ):
+                    raw_np = frame[0].detach().cpu().numpy() if hasattr(frame, "detach") else np.asarray(frame[0])
+                    np.savez_compressed(
+                        capture_camera_output_raw_dir / f"{camera_output_frames:06d}_{data_type}.npz",
+                        data=raw_np,
+                    )
+                writer = camera_output_writers.get(data_type)
+                if writer is None:
+                    continue
+                frame_np = _to_uint8_camera_output(data_type, frame[0])
+                if camera_output_frames == 0:
+                    logger.info(
+                        "Captured ego camera output {} shape={} min={} max={} mean={:.3f}".format(
+                            data_type,
+                            tuple(frame_np.shape),
+                            int(frame_np.min()),
+                            int(frame_np.max()),
+                            float(frame_np.mean()),
+                        )
+                    )
+                writer.append_data(frame_np)
+            camera_output_frames += 1
+
         run_once = config.get("run_once", False)
         envs_completed = torch.zeros(config.num_envs, dtype=torch.bool, device=device)
 
@@ -694,6 +830,7 @@ def main(override_config: omegaconf.OmegaConf):
                 actor_state = {}
                 actions = policy_model.rollout(obs_dict=obs_dict)
                 capture_camera_rgb(obs_dict)
+                capture_camera_outputs()
                 actor_state["actions"] = policy_model.action_mean.detach()
                 actor_state["obs_dict"] = actions["obs_dict"]
 
@@ -737,6 +874,8 @@ def main(override_config: omegaconf.OmegaConf):
 
     if camera_rgb_writer is not None:
         camera_rgb_writer.close()
+    for writer in camera_output_writers.values():
+        writer.close()
 
     if simulator_type == "IsaacSim":
         os._exit(0)
