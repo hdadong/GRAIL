@@ -58,6 +58,159 @@ from gear_sonic.utils import config_utils, obs_utils
 config_utils.register_rl_resolvers()
 
 
+VISUAL_DR_PROFILES = {
+    "warm_wood": {
+        "floor_color": [0.46, 0.30, 0.18],
+        "table_color": [0.38, 0.23, 0.12],
+        "object_color": [0.90, 0.08, 0.04],
+        "light_color": [1.00, 0.88, 0.72],
+        "light_intensity": 2600.0,
+        "sky_intensity": 650.0,
+    },
+    "cool_tile": {
+        "floor_color": [0.62, 0.66, 0.70],
+        "table_color": [0.12, 0.13, 0.15],
+        "object_color": [0.06, 0.72, 0.28],
+        "light_color": [0.76, 0.86, 1.00],
+        "light_intensity": 3300.0,
+        "sky_intensity": 900.0,
+    },
+    "marble_bright": {
+        "floor_color": [0.84, 0.80, 0.70],
+        "table_color": [0.88, 0.86, 0.80],
+        "object_color": [0.96, 0.66, 0.05],
+        "light_color": [1.00, 0.96, 0.86],
+        "light_intensity": 3800.0,
+        "sky_intensity": 1100.0,
+    },
+    "dark_lab": {
+        "floor_color": [0.16, 0.17, 0.18],
+        "table_color": [0.22, 0.24, 0.26],
+        "object_color": [0.18, 0.34, 0.95],
+        "light_color": [0.78, 0.88, 1.00],
+        "light_intensity": 2200.0,
+        "sky_intensity": 420.0,
+    },
+    "green_studio": {
+        "floor_color": [0.26, 0.43, 0.33],
+        "table_color": [0.62, 0.48, 0.32],
+        "object_color": [0.68, 0.05, 0.72],
+        "light_color": [0.84, 1.00, 0.90],
+        "light_intensity": 2900.0,
+        "sky_intensity": 760.0,
+    },
+}
+
+
+def _visual_dr_get(config, key, default=None):
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _apply_visual_domain_randomization(visual_dr_config) -> None:
+    """Apply lightweight USD material and lighting overrides for eval videos."""
+    enabled = bool(_visual_dr_get(visual_dr_config, "enabled", True))
+    if not enabled:
+        return
+
+    profile_name = str(_visual_dr_get(visual_dr_config, "profile", "warm_wood"))
+    profile = dict(VISUAL_DR_PROFILES.get(profile_name, VISUAL_DR_PROFILES["warm_wood"]))
+    custom = _visual_dr_get(visual_dr_config, "custom", None)
+    if custom is not None:
+        profile.update(omegaconf.OmegaConf.to_container(custom, resolve=True))
+
+    try:
+        import omni.usd
+        from pxr import Gf, Sdf, UsdLux, UsdShade
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Visual DR skipped because USD modules are unavailable: {exc}")
+        return
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        logger.warning("Visual DR skipped because no USD stage is active.")
+        return
+
+    def make_material(name, color, roughness=0.72, metallic=0.0):
+        mat_path = f"/World/Looks/visual_dr_{name}_{profile_name}"
+        material = UsdShade.Material.Define(stage, mat_path)
+        shader = UsdShade.Shader.Define(stage, f"{mat_path}/Shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+        )
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(float(metallic))
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        return material
+
+    materials = {
+        "floor": make_material("floor", profile["floor_color"], roughness=0.88),
+        "table": make_material("table", profile["table_color"], roughness=0.62),
+        "object": make_material("object", profile["object_color"], roughness=0.55),
+    }
+    counts = {"floor": 0, "table": 0, "object": 0, "light": 0}
+
+    def category_for_path(path):
+        path_lower = path.lower()
+        if "/world/ground" in path_lower or "/terrain/" in path_lower:
+            return "floor"
+        if "/table" in path_lower:
+            return "table"
+        if "/object" in path_lower or "/object_" in path_lower:
+            return "object"
+        return None
+
+    for prim in stage.Traverse():
+        if not prim.IsValid() or prim.GetTypeName() not in {"Mesh", "Cube", "Xform"}:
+            continue
+        category = category_for_path(str(prim.GetPath()))
+        if category is None:
+            continue
+        try:
+            UsdShade.MaterialBindingAPI.Apply(prim)
+            UsdShade.MaterialBindingAPI(prim).Bind(materials[category])
+            counts[category] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Failed to bind visual DR material to {prim.GetPath()}: {exc}")
+
+    light_color = profile["light_color"]
+    light_vec = Gf.Vec3f(float(light_color[0]), float(light_color[1]), float(light_color[2]))
+    light_intensity = float(profile["light_intensity"])
+    sky_intensity = float(profile["sky_intensity"])
+    for prim in stage.Traverse():
+        type_name = prim.GetTypeName()
+        if type_name not in {"DistantLight", "DomeLight", "SphereLight", "RectLight"}:
+            continue
+        try:
+            prim.CreateAttribute("inputs:color", Sdf.ValueTypeNames.Color3f, custom=False).Set(light_vec)
+            intensity = sky_intensity if type_name == "DomeLight" else light_intensity
+            prim.CreateAttribute("inputs:intensity", Sdf.ValueTypeNames.Float, custom=False).Set(intensity)
+            counts["light"] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Failed to update visual DR light {prim.GetPath()}: {exc}")
+
+    if counts["light"] == 0:
+        dome = UsdLux.DomeLight.Define(stage, "/World/visual_dr_skyLight")
+        dome.CreateColorAttr(light_vec)
+        dome.CreateIntensityAttr(sky_intensity)
+        counts["light"] = 1
+
+    logger.info(
+        "Applied visual DR profile={} floor_prims={} table_prims={} object_prims={} lights={}".format(
+            profile_name,
+            counts["floor"],
+            counts["table"],
+            counts["object"],
+            counts["light"],
+        )
+    )
+
+
 @hydra.main(config_path="config", config_name="base_eval")
 def main(override_config: omegaconf.OmegaConf):
 
@@ -590,6 +743,9 @@ def main(override_config: omegaconf.OmegaConf):
     if config.get("run_eval_loop", True):
         env.set_is_evaluating(True)
         obs_dict = env.reset_all()
+        visual_dr_config = config.get("visual_domain_randomization", None)
+        if visual_dr_config is not None and accelerator.is_main_process:
+            _apply_visual_domain_randomization(visual_dr_config)
         model.eval()
         for obs_key in obs_dict:
             obs_dict[obs_key] = obs_dict[obs_key].to(device)
