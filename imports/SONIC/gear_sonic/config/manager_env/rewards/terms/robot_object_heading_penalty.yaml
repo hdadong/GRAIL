@@ -1,0 +1,9 @@
+robot_object_heading_penalty:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:robot_object_heading_penalty
+  weight: -1000.0
+  params:
+    command_name: "motion"
+    forward_axis: [1.0, 0.0, 0.0]
+    hand: right_hand
+    disable_after_contact: true

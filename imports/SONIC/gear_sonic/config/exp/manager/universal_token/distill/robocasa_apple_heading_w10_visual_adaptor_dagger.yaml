@@ -1,0 +1,46 @@
+# @package _global_
+#
+# First-person RGB student for the apple tabletop task.
+#
+# The student keeps the SONIC action-transform module and decoder path intact.
+# It replaces the actor/adaptor policy's privileged object/table/contact inputs
+# with a camera RGB embedding and imitates the apple_heading_w10 teacher via
+# DAgger. The actor output remains the 66-dim meta action used by the teacher.
+
+defaults:
+  - /exp/manager/universal_token/distill/robocasa_visual_privileged_adaptor_dagger
+  - _self_
+
+exp_var: robocasa_apple_heading_w10_visual_adaptor_dagger
+experiment_name: ${exp_base}_${exp_var}
+
+num_envs: 1024
+motion_shard_by_rank: false
+
+algo:
+  config:
+    teacher_checkpoint: /root/GRAIL/imports/SONIC/logs_rl/GRAB_Tracking/apple_heading_w10_20260708_083408/last.pt
+    teacher_input_key: actor_obs
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 1.0
+    use_dagger: true
+    num_learning_iterations: 30000
+    save_interval: 500
+    eval_frequency: 500
+
+manager_env:
+  config:
+    gpu_collision_stack_size_exp: 30
+    object_usd_path: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/object_usd
+
+  commands:
+    motion:
+      filter_motion_keys: [apple_0_kid_indoor2-pickup-table_rand00001]
+      motion_lib_cfg:
+        motion_file: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/robot
+        object_motion_file: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/objects
+        bps_dir: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/bps
+        filter_motion_keys: [apple_0_kid_indoor2-pickup-table_rand00001]
+        asset:
+          assetRoot: /root/GRAIL/imports/SONIC/gear_sonic/data/assets/robot_description/mjcf/
+        smpl_motion_file: dummy

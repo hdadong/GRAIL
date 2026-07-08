@@ -1,0 +1,58 @@
+# @package _global_
+#
+# Apple-only tabletop teacher with a light robot-object heading penalty.
+#
+# This captures the hyperparameters used by the converged run
+# apple_heading_w10_20260708_083408. The heading term mirrors
+# GR00T-VisualSim2Real's upfront-heading idea, but uses a much smaller weight
+# because SONIC's tabletop teacher is an imitation-tracking policy with table
+# contact termination.
+
+defaults:
+  - /exp/manager/universal_token/hoi/pnp_table
+  - _self_
+
+exp_var: apple_heading_w10_teacher
+experiment_name: ${exp_base}_${exp_var}
+
+# The source run used 1024 total envs over 2 GPUs and no motion sharding so both
+# ranks train on the same single apple trajectory.
+num_envs: 1024
+motion_shard_by_rank: false
+
+resume: true
+checkpoint: models/pnp_table/last.pt
+
+algo:
+  config:
+    num_learning_iterations: 3000
+    save_interval: 500
+    eval_frequency: 500
+
+manager_env:
+  config:
+    gpu_collision_stack_size_exp: 28
+    object_usd_path: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/object_usd
+
+  rewards:
+    robot_object_heading_penalty:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:robot_object_heading_penalty
+      weight: -10.0
+      params:
+        command_name: motion
+        forward_axis: [1.0, 0.0, 0.0]
+        hand: right_hand
+        disable_after_contact: true
+
+  commands:
+    motion:
+      filter_motion_keys: [apple_0_kid_indoor2-pickup-table_rand00001]
+      motion_lib_cfg:
+        motion_file: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/robot
+        object_motion_file: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/objects
+        bps_dir: /root/GRAIL/data/motion_lib/mixed_robocasa_pickup_table_2_g1_ha/bps
+        filter_motion_keys: [apple_0_kid_indoor2-pickup-table_rand00001]
+        asset:
+          assetRoot: /root/GRAIL/imports/SONIC/gear_sonic/data/assets/robot_description/mjcf/
+        smpl_motion_file: dummy

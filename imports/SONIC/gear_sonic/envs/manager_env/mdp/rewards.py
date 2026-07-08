@@ -90,6 +90,7 @@ class RewardsCfg:
     # Approach behavior rewards (sim2real: prevent swatting, keep hand open)
     approach_velocity_penalty = None
     open_hand_until_close = None
+    robot_object_heading_penalty = None
     upright_penalty = None
     # Foot slippage penalty (penalize foot velocity while in ground contact)
     foot_slippage_penalty = None
@@ -1070,6 +1071,45 @@ def reward_wrist_look_at_object(
     alignment = torch.sum(forward_world * wrist_to_obj, dim=-1)  # [num_envs]
 
     return alignment * approach_mask
+
+
+def robot_object_heading_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str = "motion",
+    forward_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+    hand: str = "right_hand",
+    disable_after_contact: bool = True,
+) -> torch.Tensor:
+    """Penalty for the robot base not facing the object in the XY plane.
+
+    This mirrors GR00T-VisualSim2Real's ``penalty_upfront_heading``: compute the
+    yaw from robot to object and the robot forward yaw, then return the squared
+    wrapped heading error normalized by pi. Use a negative reward weight.
+    """
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    robot_pos = robot.data.root_pos_w[:, :3]
+    obj_pos = obj.data.root_pos_w[:, :3]
+    obj_dir = obj_pos[:, :2] - robot_pos[:, :2]
+    obj_yaw = torch.atan2(obj_dir[:, 1], obj_dir[:, 0])
+
+    forward_local = torch.tensor(
+        forward_axis, device=env.device, dtype=robot_pos.dtype
+    ).unsqueeze(0).expand(env.num_envs, -1)
+    forward_world = quat_apply(robot.data.root_quat_w, forward_local)
+    robot_yaw = torch.atan2(forward_world[:, 1], forward_world[:, 0])
+
+    yaw_error = torch.atan2(torch.sin(obj_yaw - robot_yaw), torch.cos(obj_yaw - robot_yaw))
+    penalty = torch.square(yaw_error / torch.pi)
+
+    if disable_after_contact:
+        command: TrackingCommand = env.command_manager.get_term(command_name)
+        in_contact = command.get_in_contact(hand)
+        if in_contact is not None:
+            penalty = penalty * (1.0 - in_contact)
+
+    return penalty
 
 
 def reward_wrist_smoothness_at_contact(
