@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import nn
+import torchvision.models as models
 
 
 class Conv2dProjector(nn.Module):
@@ -29,6 +30,54 @@ class Conv2dProjector(nn.Module):
         x = self.conv_layers(x)
         x = x.reshape(x.shape[0], -1)  # flatten spatial dims
         x = self.mlp_head(x)
+        return x.reshape(*leading_shape, -1)
+
+
+class ResNetImageProjector(nn.Module):
+    """ResNet projector for channels-last RGB observations.
+
+    Accepts either ``(..., H, W, C)`` images from an observation dict or a
+    flattened ``(..., H*W*C)`` tensor. The output preserves the leading shape.
+    """
+
+    def __init__(self, input_shape, output_dim, resnet_type="resnet18", pretrained=True, trainable=True, activation_cls=nn.SiLU):
+        super().__init__()
+        self.input_shape = tuple(input_shape)  # (H, W, C)
+        if resnet_type == "resnet18":
+            resnet = models.resnet18(pretrained=pretrained)
+            feat_dim = 512
+        elif resnet_type == "resnet34":
+            resnet = models.resnet34(pretrained=pretrained)
+            feat_dim = 512
+        elif resnet_type == "resnet50":
+            resnet = models.resnet50(pretrained=pretrained)
+            feat_dim = 2048
+        else:
+            raise ValueError(f"Unsupported ResNet projector type: {resnet_type}")
+
+        features = nn.Sequential(*list(resnet.children())[:-2])
+        if not trainable:
+            for param in features.parameters():
+                param.requires_grad = False
+
+        self.module = nn.Sequential(
+            features,
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(feat_dim, output_dim),
+            activation_cls(),
+        )
+
+    def forward(self, x):
+        H, W, C = self.input_shape
+        if x.shape[-1] == H * W * C:
+            leading_shape = x.shape[:-1]
+            x = x.reshape(-1, H, W, C)
+        else:
+            leading_shape = x.shape[:-3]
+            x = x.reshape(-1, H, W, C)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = self.module(x)
         return x.reshape(*leading_shape, -1)
 
 
@@ -244,7 +293,20 @@ def build_projector_from_config(proj_cfg, feat_dim=None):
     out_dim = proj_cfg["output_dim"]
     activation_cls = getattr(nn, proj_cfg.get("activation", "SiLU"))
 
-    if proj_type == "gru_conv2d":
+    if proj_type == "resnet":
+        module = ResNetImageProjector(
+            input_shape=proj_cfg["input_shape"],
+            output_dim=out_dim,
+            resnet_type=proj_cfg.get("resnet_type", "resnet18"),
+            pretrained=proj_cfg.get("pretrained", True),
+            trainable=proj_cfg.get("trainable", True),
+            activation_cls=activation_cls,
+        )
+        desc = (
+            f"ResNetImage: input_shape={proj_cfg['input_shape']} "
+            f"type={proj_cfg.get('resnet_type', 'resnet18')} -> {out_dim}"
+        )
+    elif proj_type == "gru_conv2d":
         module = _build_gru_conv2d_projector(
             input_shape=proj_cfg["input_shape"],
             conv_channels=proj_cfg.get("conv_channels", [16, 32]),

@@ -1,0 +1,220 @@
+# @package _global_
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - /callbacks/im_resample
+  - /manager_env/observations/camera_rgb: base
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: camera_cnn_distill
+  - override /manager_env/observations/tokenizer: single_token_noz_hmap_proj
+  - override /manager_env/observations/policy: local_dir_hist_obj
+  - override /manager_env/observations/critic: privileged_mf_hist_obj
+  - override /manager_env/events: tracking/level0_2
+  - override /manager_env/rewards: tracking/base_5point_local_feet_acc
+  - override /manager_env/terminations: tracking/base_adaptive_strict_ori_foot_xyz
+  - _self_
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+exp_var: terrain_stairs_ego_distill
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 1024
+project_name: TRL_G1_Track
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  config:
+    safe_nan: true
+    robot:
+      type: g1_model_12
+    terrain_type: plane
+    add_object: true
+    env_spacing: 10.0
+    enable_cameras: true
+    camera_resolution: [96, 160]
+    cameras:
+      camera_resolution: [96, 160]
+      camera_attached_link: torso_link
+      camera_pos_offset: [0.18, 0.0, 0.35]
+      camera_rot_offset: [1.0, 0.0, 0.0, 0.0]
+      camera_data_types: [rgb]
+      camera_focal_length: 1.88
+      camera_focus_distance: 0.5
+      camera_horizontal_aperture: 2.6035
+      camera_vertical_aperture: 1.4621
+      camera_clipping_range: [0.05, 20.0]
+    terrain_motion_dir: null
+    terrain_usd_path: null
+    terrain_motion_keys_path: null
+    flat_motion_dir: null
+    flat_motion_keys_path: null
+    flat_usd_path: null
+    flat_to_terrain_ratio: 0
+    enable_depth_camera: false
+  commands:
+    motion:
+      use_height_map: true
+      reward_point_body: [torso_link, left_wrist_yaw_link, right_wrist_yaw_link, left_ankle_roll_link, right_ankle_roll_link]
+      reward_point_body_offset: [[0.0, 0.0, 0.5], [0.0, -0.0, 0.0], [0.0, -0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      cat_upper_body_poses: true
+      cat_upper_body_poses_prob: 0.5
+      terrain_aware_sampling: false
+      flat_to_terrain_ratio: 0
+      use_paired_motions: true
+      init_z_offset: 0.05
+      pose_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+      velocity_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+      joint_position_range: [0, 0]
+      joint_velocity_range: [0, 0]
+      encoder_sample_probs:
+        g1: 1.0
+        teleop: 1.0
+        smpl: 1.0
+      motion_lib_cfg:
+        upper_body_augment_prefixes: ["2025", "sonic_mixed_walking_running", "sonic_squating_different_height_switching", "sonic_running", "sonic_walking", "sonic_squating_different_height_hold", "sonic_walking_other_style", "balance"]
+        adaptive_sampling:
+          adp_samp_failure_rate_max_over_mean: 200
+          enable: false
+        motion_file: data/combined_bones_18399_0901_filtered.pkl
+        smpl_motion_file: dummy
+        smpl_y_up: true
+  events:
+    push_robot: null
+    add_joint_default_pos: null
+    base_com: null
+    randomize_rigid_body_mass: null
+    physics_material: null
+  observations:
+    policy:
+      enable_corruption: false
+    tokenizer:
+      enable_corruption: false
+
+algo:
+  config:
+    empty_cache_every_n_ppo_epoch: -1
+    num_steps_per_env: 16
+    use_clampped_std: true
+    std_clamp_min: 0.001
+    std_clamp_max: 0.5
+    max_grad_norm: 0.1
+    num_learning_iterations: 30000
+    num_learning_epochs: 3
+    num_mini_batches: 4
+    actor_learning_rate: 2e-4
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 1.0
+    use_dagger: true
+    actor:
+      backbone:
+        module_config_dict:
+          image_shape: [96, 160, 3]
+    teacher_checkpoint: null
+    teacher_actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_obs_dict: true
+      has_aux_loss: true
+      backbone:
+        _target_: gear_sonic.trl.modules.universal_token_modules.UniversalTokenModule
+        num_future_frames: ${manager_env.commands.motion.num_future_frames}
+        proprioception_features: [actor_obs]
+        encoder_sample_probs: ${manager_env.commands.motion.encoder_sample_probs}
+        num_fsq_levels: 32
+        fsq_level_list: 32
+        max_num_tokens: 2
+        quantizer:
+          _target_: vector_quantize_pytorch.FSQ
+        encoders:
+          g1:
+            inputs: [command_multi_future_nonflat, motion_anchor_ori_b_mf_nonflat, height_map_z_flat]
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims: ${manager_env.commands.motion.num_future_frames}
+              num_output_temporal_dims: ${algo.config.teacher_actor.backbone.max_num_tokens}
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 1024, 512, 512]
+                  activation: SiLU
+            input_projectors:
+              height_map_z_flat:
+                type: conv2d
+                input_shape: [1, 11, 11]
+                channels: [16, 32]
+                kernel_sizes: [3, 3]
+                strides: [1, 1]
+                paddings: [1, 1]
+                use_maxpool: true
+                hidden_dims: [128]
+                output_dim: 128
+                activation: ReLU
+        decoders:
+          g1_dyn:
+            inputs: [token_flattened, proprioception]
+            outputs: [action]
+            has_temporal_dim: false
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims:
+              num_output_temporal_dims:
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+                  activation: SiLU
+          g1_kin:
+            inputs: [token]
+            outputs: [command_multi_future_nonflat, motion_anchor_ori_b_mf_nonflat]
+            has_temporal_dim: true
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims: ${algo.config.teacher_actor.backbone.max_num_tokens}
+              num_output_temporal_dims: ${manager_env.commands.motion.num_future_frames}
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 1024, 512, 512]
+                  activation: SiLU
+        aux_loss_func:
+          g1_recon:
+            _target_: gear_sonic.trl.losses.token_losses.G1ReconLoss
+            loss_type: mse
+        aux_loss_coef:
+          g1_recon: 0.01
+
+callbacks:
+  model_save:
+    save_frequency: 500
+    max_disk_usage: 14.8

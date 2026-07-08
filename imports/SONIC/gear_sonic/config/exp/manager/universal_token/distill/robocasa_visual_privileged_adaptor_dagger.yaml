@@ -1,0 +1,46 @@
+# @package _global_
+
+defaults:
+  - /exp/manager/universal_token/distill/robocasa_ego_distill
+  - _self_
+
+exp_var: robocasa_visual_privileged_adaptor_dagger
+experiment_name: ${exp_base}_${exp_var}
+
+algo:
+  config:
+    teacher_checkpoint: /root/GRAIL/imports/SONIC/logs_rl/GRAB_Tracking/mixed_robocasa_pickup_table_2_g1_ha_pnp_table_2gpu-20260701_153746/last.pt
+    teacher_input_key: actor_obs
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 1.0
+    use_dagger: true
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_key: actor_obs
+      input_obs_dict: true
+      output_original_obs_dict: true
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.PrivilegedVisualReplacementMLP
+        process_output_dim: true
+        module_config_dict:
+          actor_key: actor_obs
+          image_key: camera_rgb
+          image_shape: [108, 192, 3]
+          output_dim: [robot_action_dim]
+          resnet_type: resnet18
+          pretrained: true
+          trainable: true
+          fusion_hidden_dims: [512, 256, 128]
+          activation: SiLU
+          replace_terms:
+            - target_object_pos
+            - hand_object_transform_6d
+            - finger_tips_force
+            - object_pos_b
+            - object_ori_b_6d
+            - table_pos_b
+            - table_ori_b
+            - object_pos_delta_multi_future
+            - object_ori_delta_multi_future_6d
+            - object_bps

@@ -83,6 +83,14 @@ if conda env list 2>/dev/null | grep -q "^hunyuan "; then
     fi
 fi
 
+# Patch FoundationPose BundleSDF CUDA sources for current PyTorch/CUDA toolchains.
+# These substitutions mirror the scratch install flow and are idempotent.
+FP_BUNDLESDF_CUDA_DIR="$PROJECT_ROOT/imports/FoundationPose/bundlesdf/mycuda"
+if [ -f "$FP_BUNDLESDF_CUDA_DIR/setup.py" ] && [ -f "$FP_BUNDLESDF_CUDA_DIR/common.cu" ]; then
+    sed -i "s/std=c++14/std=c++17/g" "$FP_BUNDLESDF_CUDA_DIR/setup.py"
+    sed -i "s/\\.type()/\\.scalar_type()/g" "$FP_BUNDLESDF_CUDA_DIR/common.cu"
+fi
+
 # Build FoundationPose mycpp.so if missing or built against the wrong Python
 # ABI. Some image builds carried mycpp.cpython-313*.so while grail runs Python
 # 3.10, causing FoundationPose to silently set mycpp=None.

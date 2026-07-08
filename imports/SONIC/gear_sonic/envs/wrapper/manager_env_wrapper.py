@@ -183,6 +183,12 @@ class ManagerEnvWrapper:
                     f"Loaded action_transform_module checkpoint: {action_transform_module_checkpoint}"
                 )
 
+            if self.config.get("freeze_action_transform_module", False):
+                for param in self.action_transform_module.parameters():
+                    param.requires_grad = False
+                self.action_transform_module.eval()
+                logger.info("Froze action_transform_module parameters and set eval mode")
+
             # Precompute tokenizer observation indices for meta_action target
             self._tokenizer_obs_indices = self._compute_tokenizer_obs_indices()
 

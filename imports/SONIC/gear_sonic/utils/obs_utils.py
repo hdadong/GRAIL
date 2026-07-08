@@ -90,3 +90,25 @@ def get_group_term_obs_shape(example_obs, group_name):
         group_obs_dims[key] = tuple(value.shape[1:])
         group_obs_total_dim += np.prod(group_obs_dims[key]).item()
     return group_obs_dims, group_obs_names, group_obs_total_dim
+
+
+def get_group_term_obs_shape_from_manager(observation_manager, example_obs, group_name):
+    """Get per-term observation shapes using IsaacLab's observation manager metadata.
+
+    Concatenated observation groups (for example ``policy`` and ``critic``) show
+    up as a single tensor in ``example_obs``. The observation manager still keeps
+    the original term order and dimensions, which is needed when a module must
+    slice a flattened observation by semantic term name.
+    """
+    term_names = getattr(observation_manager, "_group_obs_term_names", {}).get(group_name)
+    term_dims = getattr(observation_manager, "_group_obs_term_dim", {}).get(group_name)
+    if not term_names or not term_dims:
+        return get_group_term_obs_shape(example_obs, group_name)
+
+    group_obs_dims = {}
+    group_obs_total_dim = 0
+    for name, dims in zip(term_names, term_dims):
+        dims = tuple(int(dim) for dim in dims)
+        group_obs_dims[name] = dims
+        group_obs_total_dim += int(np.prod(dims).item())
+    return group_obs_dims, list(term_names), group_obs_total_dim

@@ -1,0 +1,97 @@
+# @package _global_
+
+defaults:
+  - /exp/manager/universal_token/distill/terrain_stairs_ego_distill
+  - _self_
+
+exp_var: terrain_stairs_rgb_height_distill
+experiment_name: ${exp_base}_${exp_var}
+
+algo:
+  config:
+    teacher_checkpoint: /root/GRAIL/imports/SONIC/logs_rl/TRL_G1_Track/mixed_terrain_stairs_7_g1_terrain_tracking_6gpu-20260701_153746/last.pt
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 1.0
+    use_dagger: true
+    pretrained_model:
+      path: /root/GRAIL/imports/SONIC/logs_rl/TRL_G1_Track/mixed_terrain_stairs_7_g1_terrain_tracking_6gpu-20260701_153746/last.pt
+      state_dict_key: policy_state_dict
+      strict: false
+      module_mapping:
+        policy: ""
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_obs_dict: true
+      output_original_obs_dict: true
+      has_aux_loss: true
+      backbone:
+        _target_: gear_sonic.trl.modules.universal_token_modules.UniversalTokenModule
+        num_future_frames: ${manager_env.commands.motion.num_future_frames}
+        proprioception_features: [actor_obs]
+        encoder_sample_probs: ${manager_env.commands.motion.encoder_sample_probs}
+        num_fsq_levels: 32
+        fsq_level_list: 32
+        max_num_tokens: 2
+        quantizer:
+          _target_: vector_quantize_pytorch.FSQ
+        encoders:
+          g1:
+            inputs: [command_multi_future_nonflat, motion_anchor_ori_b_mf_nonflat, camera_rgb]
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims: ${manager_env.commands.motion.num_future_frames}
+              num_output_temporal_dims: ${algo.config.actor.backbone.max_num_tokens}
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 1024, 512, 512]
+                  activation: SiLU
+            input_projectors:
+              camera_rgb:
+                type: resnet
+                input_shape: [96, 160, 3]
+                output_dim: 128
+                resnet_type: resnet18
+                pretrained: true
+                trainable: true
+                activation: SiLU
+        decoders:
+          g1_dyn:
+            inputs: [token_flattened, proprioception]
+            outputs: [action]
+            has_temporal_dim: false
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims:
+              num_output_temporal_dims:
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+                  activation: SiLU
+          g1_kin:
+            inputs: [token]
+            outputs: [command_multi_future_nonflat, motion_anchor_ori_b_mf_nonflat]
+            has_temporal_dim: true
+            params:
+              _target_: gear_sonic.trl.modules.base_module.BaseModule
+              input_dim:
+              output_dim:
+              num_input_temporal_dims: ${algo.config.actor.backbone.max_num_tokens}
+              num_output_temporal_dims: ${manager_env.commands.motion.num_future_frames}
+              module_config_dict:
+                layer_config:
+                  type: MLP
+                  hidden_dims: [2048, 1024, 512, 512]
+                  activation: SiLU
+        aux_loss_func:
+          g1_recon:
+            _target_: gear_sonic.trl.losses.token_losses.G1ReconLoss
+            loss_type: mse
+        aux_loss_coef:
+          g1_recon: 0.01

@@ -52,6 +52,7 @@ config:
 
   action_transform_module_cfg:
   action_transform_module_checkpoint:
+  freeze_action_transform_module: false
   meta_action_dim:
   needs_policy_atm: true
 

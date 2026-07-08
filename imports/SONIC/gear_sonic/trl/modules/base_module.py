@@ -831,3 +831,154 @@ class BaseModuleAux(BaseModule):
             "aux_losses": aux_losses,
             "aux_loss_coef": self.aux_loss_coef,
         }
+
+
+class PrivilegedVisualReplacementMLP(nn.Module):
+    """Replace selected privileged policy-observation terms with RGB features.
+
+    The module keeps the original adaptor-policy MLP interface: it consumes the
+    full observation dict and outputs the same action dimension. Internally it
+    parses the concatenated ``actor_obs`` using the policy observation term
+    names/dimensions, drops configured privileged terms, projects ego RGB to the
+    same replacement dimension, then runs an MLP on ``kept_obs + rgb_embedding``.
+    """
+
+    def __init__(
+        self,
+        obs_dim_dict=None,
+        module_config_dict=None,
+        module_dim_dict=None,
+        env_config=None,
+        algo_config=None,  # noqa: ARG002
+        process_output_dim=False,
+        **kwargs,  # noqa: ARG002
+    ):
+        super().__init__()
+        if obs_dim_dict is None and env_config is not None:
+            obs_dim_dict = env_config.robot.algo_obs_dim_dict
+        self.obs_dim_dict = obs_dim_dict
+        self.env_config = env_config
+        self.module_config_dict = module_config_dict
+        self.actor_key = module_config_dict.get("actor_key", "actor_obs")
+        self.image_key = module_config_dict.get("image_key", "camera_rgb")
+        self.replace_terms = list(module_config_dict.get("replace_terms", []))
+        self.image_shape = module_config_dict.get("image_shape", [108, 192, 3])
+
+        group_names = list(env_config.obs.group_obs_names["policy"])
+        group_dims = env_config.obs.group_obs_dims["policy"]
+        self.term_slices = {}
+        cursor = 0
+        for name in group_names:
+            dim = int(torch.tensor(group_dims[name]).prod().item())
+            self.term_slices[name] = (cursor, cursor + dim)
+            cursor += dim
+        if cursor != self.obs_dim_dict[self.actor_key]:
+            raise ValueError(
+                f"{self.actor_key} dim mismatch while parsing policy terms: "
+                f"parsed={cursor}, obs_dim={self.obs_dim_dict[self.actor_key]}"
+            )
+
+        missing = [name for name in self.replace_terms if name not in self.term_slices]
+        if missing:
+            raise KeyError(
+                f"replace_terms not found in policy observations: {missing}. "
+                f"Available terms={group_names}"
+            )
+
+        self.keep_slices = [
+            slc for name, slc in self.term_slices.items() if name not in self.replace_terms
+        ]
+        self.keep_dim = sum(end - start for start, end in self.keep_slices)
+        self.replace_dim = sum(
+            self.term_slices[name][1] - self.term_slices[name][0]
+            for name in self.replace_terms
+        )
+        image_feature_dim = int(module_config_dict.get("image_feature_dim", self.replace_dim))
+        fused_dim = self.keep_dim + image_feature_dim
+
+        output_dim_cfg = module_config_dict["output_dim"]
+        if isinstance(output_dim_cfg, int):
+            self.output_dim = output_dim_cfg
+        else:
+            self.output_dim = 0
+            module_dim_dict = module_dim_dict or {}
+            for item in output_dim_cfg:
+                if item == "robot_action_dim" and process_output_dim:
+                    self.output_dim += env_config.robot.actions_dim
+                elif isinstance(item, int | float):
+                    self.output_dim += int(item)
+                elif item in module_dim_dict:
+                    self.output_dim += module_dim_dict[item]
+                else:
+                    raise ValueError(f"Unknown output type: {item}")
+
+        self.image_encoder = self._build_image_encoder(module_config_dict, image_feature_dim)
+        self.fusion = self._build_mlp(
+            input_dim=fused_dim,
+            hidden_dims=module_config_dict.get("fusion_hidden_dims", [512, 256, 128]),
+            output_dim=self.output_dim,
+            activation_name=module_config_dict.get("activation", "SiLU"),
+        )
+
+    @staticmethod
+    def _build_mlp(input_dim, hidden_dims, output_dim, activation_name):
+        layers = []
+        activation_cls = getattr(nn, activation_name)
+        last_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(last_dim, hidden_dim))
+            layers.append(activation_cls())
+            last_dim = hidden_dim
+        layers.append(nn.Linear(last_dim, output_dim))
+        return nn.Sequential(*layers)
+
+    def _build_image_encoder(self, module_config_dict, image_feature_dim):
+        resnet_type = module_config_dict.get("resnet_type", "resnet18")
+        pretrained = module_config_dict.get("pretrained", True)
+        trainable = module_config_dict.get("trainable", True)
+        if resnet_type == "resnet18":
+            resnet = models.resnet18(pretrained=pretrained)
+            resnet_feature_dim = 512
+        elif resnet_type == "resnet34":
+            resnet = models.resnet34(pretrained=pretrained)
+            resnet_feature_dim = 512
+        elif resnet_type == "resnet50":
+            resnet = models.resnet50(pretrained=pretrained)
+            resnet_feature_dim = 2048
+        else:
+            raise ValueError(f"Unsupported ResNet type: {resnet_type}")
+        resnet_features = nn.Sequential(*list(resnet.children())[:-2])
+        if not trainable:
+            for param in resnet_features.parameters():
+                param.requires_grad = False
+        activation_cls = getattr(nn, module_config_dict.get("activation", "SiLU"))
+        return nn.Sequential(
+            resnet_features,
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(resnet_feature_dim, image_feature_dim),
+            activation_cls(),
+        )
+
+    def _encode_image(self, image):
+        if image.ndim not in (4, 5):
+            raise ValueError(
+                f"{self.image_key} must be [B,H,W,C] or [B,T,H,W,C], got {image.shape}"
+            )
+        prefix_shape = image.shape[:-3]
+        image = image.reshape(-1, *image.shape[-3:]).permute(0, 3, 1, 2).contiguous()
+        image_feat = self.image_encoder(image)
+        return image_feat.reshape(*prefix_shape, -1)
+
+    def forward(self, input, **kwargs):  # noqa: ARG002
+        if not hasattr(input, "__getitem__"):
+            raise TypeError("PrivilegedVisualReplacementMLP expects an obs_dict-like input")
+        actor_obs = input[self.actor_key]
+        image_feat = self._encode_image(input[self.image_key])
+
+        kept = [actor_obs[..., start:end] for start, end in self.keep_slices]
+        actor_kept = torch.cat(kept, dim=-1)
+        if image_feat.shape[:-1] != actor_kept.shape[:-1]:
+            image_feat = image_feat.reshape(*actor_kept.shape[:-1], -1)
+        fused = torch.cat([actor_kept, image_feat], dim=-1)
+        return self.fusion(fused)

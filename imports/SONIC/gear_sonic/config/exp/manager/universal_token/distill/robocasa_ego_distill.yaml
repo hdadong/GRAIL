@@ -99,6 +99,7 @@ manager_env:
           discrete: true
     action_transform_module_cfg: models/sonic_manipulation_base/model_config.yaml
     action_transform_module_checkpoint: models/sonic_manipulation_base/last.pt
+    freeze_action_transform_module: true
     use_staged_wrapper: false
   commands:
     motion:

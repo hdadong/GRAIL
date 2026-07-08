@@ -65,7 +65,7 @@ from gear_sonic.trl.utils.common import (
 )
 from gear_sonic.utils.common import seeding
 from gear_sonic.utils.config_utils import register_rl_resolvers
-from gear_sonic.utils.obs_utils import get_group_term_obs_shape
+from gear_sonic.utils.obs_utils import get_group_term_obs_shape_from_manager
 
 register_rl_resolvers()
 
@@ -226,6 +226,10 @@ def main(config: OmegaConf):
     device = str(accelerator.device)
     if device == "cuda":
         device = "cuda:0"
+    forced_device = os.environ.get("SONIC_FORCE_DEVICE")
+    if forced_device:
+        device = forced_device
+        logger.info(f"Overriding accelerator device with SONIC_FORCE_DEVICE={device}")
     config.multi_gpu = accelerator.num_processes > 1
     if config.multi_gpu:
         config.global_rank = accelerator.process_index
@@ -420,13 +424,15 @@ def main(config: OmegaConf):
         example_obs = env.reset(flatten_dict_obs=False)
         _train_breadcrumb(config, "main: after env.reset for obs shape")
         for key in env.env.observation_space:
-            if key not in ["policy", "critic"]:
-                group_obs_dims, group_obs_names, group_obs_total_dim = get_group_term_obs_shape(
-                    example_obs, key
+            group_obs_dims, group_obs_names, group_obs_total_dim = (
+                get_group_term_obs_shape_from_manager(
+                    env.env.observation_manager, example_obs, key
                 )
-                env.config["obs"]["group_obs_dims"][key] = group_obs_dims
-                env.config["obs"]["group_obs_names"][key] = group_obs_names
-                env.config["obs"]["obs_dims"][key] = group_obs_total_dim
+            )
+            env.config["obs"]["group_obs_dims"][key] = group_obs_dims
+            env.config["obs"]["group_obs_names"][key] = group_obs_names
+            env.config["obs"]["obs_dims"][key] = group_obs_total_dim
+            if key not in ["policy", "critic"]:
                 env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
         if config.manager_env.config.get("meta_action_dim", None) is not None:
             env.config["robot"]["actions_dim"] = config.manager_env.config.meta_action_dim

@@ -291,7 +291,7 @@ class UniversalTokenModule(nn.Module):
                     feat_dim = (
                         int(np.prod(self.tokenizer_obs_dims[feat_name]))
                         if feat_name in self.tokenizer_obs_dims
-                        else None
+                        else self.obs_dim_dict.get(feat_name, None)
                     )
                     module, desc = build_projector_from_config(proj_cfg, feat_dim=feat_dim)
                     projector_dict[feat_name] = module
@@ -306,7 +306,17 @@ class UniversalTokenModule(nn.Module):
                 if key in input_projectors_cfg:
                     input_feature_dim += input_projectors_cfg[key]["output_dim"]
                 else:
-                    input_feature_dim += self.tokenizer_obs_dims[key][-1]
+                    if key in self.tokenizer_obs_dims:
+                        input_feature_dim += self.tokenizer_obs_dims[key][-1]
+                    elif key in self.obs_dim_dict:
+                        input_feature_dim += self.obs_dim_dict[key]
+                    else:
+                        raise KeyError(
+                            f"Encoder input feature '{key}' is neither a tokenizer "
+                            f"observation nor an actor observation. Available tokenizer "
+                            f"keys={list(self.tokenizer_obs_dims.keys())}, obs keys="
+                            f"{list(self.obs_dim_dict.keys())}"
+                        )
             if len(output_features) > 0:
                 output_feature_dim = sum(
                     [self.tokenizer_obs_dims[key][-1] for key in output_features]
@@ -679,7 +689,13 @@ class UniversalTokenModule(nn.Module):
         return all_tokens
 
     def encode_single(
-        self, encoder_name, tokenizer_obs, encoder_mask=None, rnn_states=None, frame_mask=None
+        self,
+        encoder_name,
+        tokenizer_obs,
+        encoder_mask=None,
+        rnn_states=None,
+        frame_mask=None,
+        extra_obs=None,
     ):
         """Encode using a single encoder without quantization or additive composition.
         This is the core encoding logic used by both regular and additive encoders.
@@ -715,7 +731,15 @@ class UniversalTokenModule(nn.Module):
         )
         obs_list = []
         for key in input_features:
-            obs = tokenizer_obs[key]
+            if key in tokenizer_obs:
+                obs = tokenizer_obs[key]
+            elif extra_obs is not None and key in extra_obs:
+                obs = extra_obs[key]
+            else:
+                raise KeyError(
+                    f"Encoder '{encoder_name}' expected input feature '{key}', "
+                    "but it was not found in tokenizer_obs or extra_obs."
+                )
             if projectors is not None and key in projectors:
                 projector = projectors[key]
                 if isinstance(projector, GRUConv2dProjector):
@@ -780,6 +804,7 @@ class UniversalTokenModule(nn.Module):
         no_quantization=False,
         rnn_states=None,
         frame_mask=None,
+        extra_obs=None,
     ):
         """Encode using the specified encoder, including any additive encoders.
 
@@ -797,7 +822,12 @@ class UniversalTokenModule(nn.Module):
         """
         # Get base encoder latent
         latent = self.encode_single(
-            encoder_name, tokenizer_obs, encoder_mask, rnn_states=rnn_states, frame_mask=frame_mask
+            encoder_name,
+            tokenizer_obs,
+            encoder_mask,
+            rnn_states=rnn_states,
+            frame_mask=frame_mask,
+            extra_obs=extra_obs,
         )
 
         # Add contributions from additive encoders
@@ -809,6 +839,7 @@ class UniversalTokenModule(nn.Module):
                     encoder_mask,
                     rnn_states=rnn_states,
                     frame_mask=frame_mask,
+                    extra_obs=extra_obs,
                 )
                 latent = latent + additive_latent
 
@@ -976,6 +1007,7 @@ class UniversalTokenModule(nn.Module):
                     no_quantization=True,
                     rnn_states=rnn_states,
                     frame_mask=frame_mask,
+                    extra_obs=input_data,
                 )
                 # Apply same mask to residual before adding
                 if encoder_mask is not None:
@@ -1022,6 +1054,7 @@ class UniversalTokenModule(nn.Module):
                         no_quantization=True,
                         rnn_states=rnn_states,
                         frame_mask=frame_mask,
+                        extra_obs=input_data,
                     )
                     encoded_latents[encoder_name] = latent
 
@@ -1053,6 +1086,7 @@ class UniversalTokenModule(nn.Module):
                         encoder_masks[encoder_name],
                         rnn_states=rnn_states,
                         frame_mask=frame_mask,
+                        extra_obs=input_data,
                     )
         all_tokens = self.assemble_all_tokens(encoded_tokens, encoder_masks, batch_size, seq_len)
 

@@ -536,13 +536,15 @@ def main(override_config: omegaconf.OmegaConf):
     ].shape[-1]
     example_obs = env.reset(flatten_dict_obs=False)
     for key in env.env.observation_space:
-        if key not in ["policy", "critic"]:
-            group_obs_dims, group_obs_names, group_obs_total_dim = (
-                obs_utils.get_group_term_obs_shape(example_obs, key)
+        group_obs_dims, group_obs_names, group_obs_total_dim = (
+            obs_utils.get_group_term_obs_shape_from_manager(
+                env.env.observation_manager, example_obs, key
             )
-            env.config["obs"]["group_obs_dims"][key] = group_obs_dims
-            env.config["obs"]["group_obs_names"][key] = group_obs_names
-            env.config["obs"]["obs_dims"][key] = group_obs_total_dim
+        )
+        env.config["obs"]["group_obs_dims"][key] = group_obs_dims
+        env.config["obs"]["group_obs_names"][key] = group_obs_names
+        env.config["obs"]["obs_dims"][key] = group_obs_total_dim
+        if key not in ["policy", "critic"]:
             env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
 
     meta_action_dim = env.config.get("meta_action_dim", None)

@@ -259,3 +259,25 @@ out/
 models/
 wandb/
 logs_rl/
+
+# Local GRAIL runtime artifacts
+.quickstart_env
+.runtime_env
+*.pid
+*.latest
+*.bak*
+*bak_*
+outputs/
+outputs_tmp/
+exports/
+run_pids/
+results_collection/
+eval_*/
+tmp_*/
+docker_stdout_test.txt
+docker_env_check.sh
+docker_recon_*.sh
+remote_auto_six_setup.sh
+run_distill_*.sh
+start_distill_*.sh
+imports/SONIC/gear_sonic/models
