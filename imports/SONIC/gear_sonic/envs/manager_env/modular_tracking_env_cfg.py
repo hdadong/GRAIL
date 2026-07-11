@@ -1482,9 +1482,12 @@ class MySceneCfg(InteractiveSceneCfg):
             # Camera resolution [H, W]
             camera_resolution = cameras_cfg.get("camera_resolution", [108, 192])
 
-            self.ego_camera = TiledCameraCfg(
+            camera_cfg_cls = (
+                TiledCameraCfg if cameras_cfg.get("use_tiled_camera", True) else CameraCfg
+            )
+            self.ego_camera = camera_cfg_cls(
                 prim_path=camera_prim_path,
-                offset=TiledCameraCfg.OffsetCfg(
+                offset=camera_cfg_cls.OffsetCfg(
                     pos=camera_pos_offset, rot=camera_rot_offset, convention="world"
                 ),
                 data_types=camera_data_types,
@@ -1493,7 +1496,7 @@ class MySceneCfg(InteractiveSceneCfg):
                 width=camera_resolution[1],
                 debug_vis=True,
                 update_period=0.0,
-                update_latest_camera_pose=True,
+                update_latest_camera_pose=cameras_cfg.get("update_latest_camera_pose", True),
             )
 
 

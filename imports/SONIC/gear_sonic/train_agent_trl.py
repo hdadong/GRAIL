@@ -320,10 +320,15 @@ def main(config: OmegaConf):
         args_cli.distributed = config.multi_gpu
         args_cli.device = device
 
-        # Base kit args (quiet logs)
+        # Base kit args (quiet logs). Allow experiments to append Kit flags
+        # without changing the training config, e.g. renderer GPU selection for
+        # per-GPU IsaacSim camera workers.
         args_cli.kit_args = (
             "--/log/level=error --/log/fileLogLevel=error --/log/outputStreamLevel=error"
         )
+        extra_kit_args = os.environ.get("SONIC_TRAIN_EXTRA_KIT_ARGS", "").strip()
+        if extra_kit_args:
+            args_cli.kit_args = f"{args_cli.kit_args} {extra_kit_args}"
 
         # AppLauncher can't handle multiple processes creating it at the same time so we need a lock
         _lock_path = "/tmp/isaaclab_app_launcher.lock"
