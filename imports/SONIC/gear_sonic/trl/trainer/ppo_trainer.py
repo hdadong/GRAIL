@@ -766,6 +766,15 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self.distill_teacher_loss_coef > 0.0 and self.ref_model is not None
         )
         self.distill_teacher_loss_fn = torch.nn.MSELoss()
+        self.diffusion_decoder_distill = (
+            self.config.get("diffusion_decoder_distill", False) and self.ref_model is not None
+        )
+        self.diffusion_latent_dim = int(self.config.get("diffusion_latent_dim", 64))
+        self.diffusion_hand_dim = int(self.config.get("diffusion_hand_dim", 2))
+        self.diffusion_target_key = self.config.get("diffusion_target_key", "diffusion_target")
+        self.diffusion_target_latent_mode = self.config.get(
+            "diffusion_target_latent_mode", "decoder_input"
+        )
 
     def _setup_storage(self):
         """Allocate rollout storage buffers and episode tracking accumulators.
@@ -856,6 +865,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         policy_state_dict = policy_model.rollout(
             obs_dict=actor_obs_dict, episode_attnmask=episode_attnmask, cur_dones=cur_dones
         )
+        distill_with_mean = self.config.get(
+            "distill_rollout_with_action_mean",
+            self.config.get("use_dagger", False) and self.distill_teacher_loss_coef > 0.0,
+        )
+        if distill_with_mean:
+            policy_state_dict["actions"] = policy_state_dict["action_mean"].detach()
+
         actions = policy_state_dict["actions"]
         actions_log_prob = policy_model.get_actions_log_prob(actions).unsqueeze(1)
         policy_state_dict["actions_log_prob"] = actions_log_prob
@@ -900,6 +916,106 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             value_chunks.append(chunk_values)
         return torch.cat(value_chunks, dim=0)
 
+    def _get_observation_manager(self):
+        env = self.env
+        if hasattr(env, "observation_manager"):
+            return env.observation_manager
+        wrapped_env = getattr(env, "env", None)
+        if wrapped_env is not None and hasattr(wrapped_env, "observation_manager"):
+            return wrapped_env.observation_manager
+        return None
+
+    @staticmethod
+    def _teacher_obs_source_group(obs_key):
+        if obs_key == "actor_obs":
+            return "policy"
+        if obs_key == "critic_obs":
+            return "critic"
+        return obs_key
+
+    def _flatten_clean_obs_group(self, observation_manager, source_group, group_obs):
+        if source_group == "policy":
+            return "actor_obs", group_obs
+        if source_group == "critic":
+            return "critic_obs", group_obs
+        if not isinstance(group_obs, dict):
+            return source_group, group_obs
+        if source_group == "height_map" and "height_map" in group_obs:
+            return source_group, group_obs["height_map"]
+        if source_group == "camera_rgb" and "camera_rgb" in group_obs:
+            return source_group, group_obs["camera_rgb"]
+
+        term_names = getattr(observation_manager, "_group_obs_term_names", {}).get(source_group, [])
+        if not term_names:
+            return source_group, group_obs
+        flattened_terms = [
+            group_obs[term_name].reshape(group_obs[term_name].shape[0], -1)
+            for term_name in term_names
+        ]
+        return source_group, torch.cat(flattened_terms, dim=-1)
+
+    def _compute_clean_obs_dict(self, obs_dict):
+        """Recompute teacher-target observations with term-level noise disabled.
+
+        Student/value training still uses the noisy observations returned by the
+        environment.  The clean copy is stored only for the frozen teacher and
+        ATM target path, so labels stay stable while the student can learn from
+        corrupted proprio/state inputs.
+        """
+        observation_manager = self._get_observation_manager()
+        if observation_manager is None or not hasattr(observation_manager, "compute_group"):
+            return None
+
+        default_keys = ["actor_obs", "policy_atm", "tokenizer"]
+        requested_keys = self.config.get("clean_teacher_obs_keys", default_keys)
+        requested_keys = [key for key in requested_keys if key in obs_dict]
+        if not requested_keys:
+            return None
+
+        source_groups = []
+        for obs_key in requested_keys:
+            source_group = self._teacher_obs_source_group(obs_key)
+            if source_group not in source_groups:
+                source_groups.append(source_group)
+
+        saved_noises = []
+        clean_obs = {}
+        try:
+            for source_group in source_groups:
+                term_cfgs = getattr(observation_manager, "_group_obs_term_cfgs", {}).get(
+                    source_group
+                )
+                if term_cfgs is None:
+                    continue
+                for term_cfg in term_cfgs:
+                    if hasattr(term_cfg, "noise"):
+                        saved_noises.append((term_cfg, term_cfg.noise))
+                        term_cfg.noise = None
+
+            for source_group in source_groups:
+                if source_group not in getattr(observation_manager, "_group_obs_term_names", {}):
+                    continue
+                group_obs = observation_manager.compute_group(source_group, update_history=False)
+                obs_key, obs_value = self._flatten_clean_obs_group(
+                    observation_manager, source_group, group_obs
+                )
+                if obs_key in requested_keys and torch.is_tensor(obs_value):
+                    clean_obs[obs_key] = obs_value.detach()
+        finally:
+            for term_cfg, noise_cfg in saved_noises:
+                term_cfg.noise = noise_cfg
+
+        return clean_obs or None
+
+    def _store_clean_teacher_obs(self, clean_obs_dict):
+        if clean_obs_dict is None:
+            return
+        for key, value in clean_obs_dict.items():
+            clean_key = f"clean_{key}"
+            if getattr(self.storage, clean_key, None) is None:
+                self.storage.register_key(clean_key, shape=value.shape[1:], dtype=value.dtype)
+            self.storage.update_key(clean_key, value)
+
     def _rollout_step(self, model, obs_dict):
         """Collect a full rollout of ``num_steps_per_env`` transitions and compute returns.
 
@@ -930,6 +1046,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 # TODO: 1: unsqueeze to [B, 1, ...]  # noqa: TD002, TD003
                 policy_state_dict = self.policy_step(policy_model, obs_dict, cur_dones=dones)
 
+                clean_obs_dict = self._compute_clean_obs_dict(obs_dict)
+
                 # Append states to storage
                 for key, value in obs_dict.items():
                     if key == "height_map":
@@ -946,6 +1064,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                             delattr(self.storage, key)
                             self.storage.register_key(key, shape=value.shape[1:], dtype=torch.float)
                     self.storage.update_key(key, value)
+                self._store_clean_teacher_obs(clean_obs_dict)
                 for key, value in policy_state_dict.items():
                     if key == "obs_dict":
                         continue
@@ -1165,6 +1284,11 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         all_obs_dict = {
             key: self.storage.query_key(key).transpose(0, 1).to(device) for key in obs_keys
         }
+        clean_obs_dict = {
+            key.removeprefix("clean_"): self.storage.query_key(key).transpose(0, 1).to(device)
+            for key in self.storage.stored_keys
+            if key.startswith("clean_")
+        }
         actions = self.storage.actions.transpose(0, 1).to(device)
         logprobs = self.storage.actions_log_prob.transpose(0, 1).squeeze(-1).to(device)
         values = self.storage.values.transpose(0, 1).to(device)  # noqa: PD011
@@ -1180,6 +1304,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             all_obs_dict = {
                 key: torch.cat((all_obs_dict[key], self._flip_obs(all_obs_dict[key], key)), dim=0)
                 for key in all_obs_dict.keys()  # noqa: SIM118
+            }
+            clean_obs_dict = {
+                key: torch.cat((clean_obs_dict[key], self._flip_obs(clean_obs_dict[key], key)), dim=0)
+                for key in clean_obs_dict.keys()  # noqa: SIM118
             }
             next_critic_obs = torch.cat(
                 (next_critic_obs, self._flip_obs(next_critic_obs, "critic_obs")), dim=0
@@ -1212,6 +1340,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         rollout_data = {
             "all_obs_dict": all_obs_dict,
+            "clean_obs_dict": clean_obs_dict,
             "actions": actions,
             "logprobs": logprobs,
             "values": values,
@@ -1244,6 +1373,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             key: rollout_data["all_obs_dict"][key][micro_batch_inds]
             for key in rollout_data["all_obs_dict"].keys()  # noqa: SIM118
         }
+        mb_teacher_obs_dict = {
+            key: rollout_data["clean_obs_dict"][key][micro_batch_inds]
+            for key in rollout_data.get("clean_obs_dict", {}).keys()
+        }
         mb_advantage = rollout_data["advantages"][micro_batch_inds]
         mb_logprobs = rollout_data["logprobs"][micro_batch_inds]
         mb_return = rollout_data["returns"][micro_batch_inds]
@@ -1260,6 +1393,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         mb_rollout_data = {
             "micro_batch_inds": micro_batch_inds,
             "mb_obs_dict": mb_obs_dict,
+            "mb_teacher_obs_dict": mb_teacher_obs_dict or mb_obs_dict,
             "mb_advantage": mb_advantage,
             "mb_logprobs": mb_logprobs,
             "mb_return": mb_return,
@@ -1292,32 +1426,52 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         """
         mb_obs_dict = mb_rollout_data["mb_obs_dict"]
         mb_actions = mb_rollout_data["mb_actions"]
+        mb_teacher_obs_dict = mb_rollout_data.get("mb_teacher_obs_dict", mb_obs_dict)
         episode_attnmask = mb_rollout_data["episode_attnmask"]
+        teacher_results = None
+        diffusion_target = None
+        needs_teacher = self.compute_distill_teacher_loss or self.diffusion_decoder_distill
+        if needs_teacher:
+            self.ref_model.eval()
+            with torch.no_grad():
+                teacher_results = self.ref_model.act(
+                    obs_dict=mb_teacher_obs_dict, episode_attnmask=episode_attnmask
+                )
+                if self.diffusion_decoder_distill:
+                    diffusion_target = self._build_diffusion_decoder_target(
+                        mb_teacher_obs_dict, teacher_results["action_mean"]
+                    )
 
         # We should only do one forward pass for especially DDP model
         if self.compute_imgaug_bc_loss:
+            policy_kwargs = {
+                "obs_dict": mb_obs_dict,
+                "actions": mb_actions,
+                "episode_attnmask": episode_attnmask,
+            }
+            if diffusion_target is not None:
+                policy_kwargs[self.diffusion_target_key] = diffusion_target
             results = model.forward(
                 modes=["policy_w_and_wo_imgaug", "value"],
                 input_kwargs={
-                    "policy_w_and_wo_imgaug": {
-                        "obs_dict": mb_obs_dict,
-                        "actions": mb_actions,
-                        "episode_attnmask": episode_attnmask,
-                    },
+                    "policy_w_and_wo_imgaug": policy_kwargs,
                     "value": {"obs_dict": mb_obs_dict, "episode_attnmask": episode_attnmask},
                 },
             )
             policy_results = results["policy_w_and_wo_imgaug"]
         else:
             with common.Timer("wrapper_forward_model"):
+                policy_kwargs = {
+                    "obs_dict": mb_obs_dict,
+                    "actions": mb_actions,
+                    "episode_attnmask": episode_attnmask,
+                }
+                if diffusion_target is not None:
+                    policy_kwargs[self.diffusion_target_key] = diffusion_target
                 results = model.forward(
                     modes=["policy", "value"],
                     input_kwargs={
-                        "policy": {
-                            "obs_dict": mb_obs_dict,
-                            "actions": mb_actions,
-                            "episode_attnmask": episode_attnmask,
-                        },
+                        "policy": policy_kwargs,
                         "value": {"obs_dict": mb_obs_dict, "episode_attnmask": episode_attnmask},
                     },
                 )
@@ -1326,14 +1480,77 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             "policy_results": policy_results,
             "value_results": results["value"],
         }
-        if self.compute_distill_teacher_loss:
-            self.ref_model.eval()
-            with torch.no_grad():
-                teacher_results = self.ref_model.act(
-                    obs_dict=mb_obs_dict, episode_attnmask=episode_attnmask
-                )
+        if teacher_results is not None:
             ret["teacher_results"] = teacher_results
         return ret
+
+    def _build_diffusion_decoder_target(self, obs_dict, teacher_action_mean):
+        """Build the diffusion target: decoder-input latent plus hand action.
+
+        The HOI teacher predicts a latent residual.  The environment applies
+        that residual to the frozen action-transform module's encoder output
+        before decoding.  For diffusion distillation we supervise the student on
+        the actual flattened decoder token instead of the residual, so inference
+        can run in direct-latent mode.
+        """
+        latent_residual = teacher_action_mean[..., : self.diffusion_latent_dim].detach()
+        hand_action = teacher_action_mean[
+            ..., self.diffusion_latent_dim : self.diffusion_latent_dim + self.diffusion_hand_dim
+        ].detach()
+        if self.diffusion_target_latent_mode == "teacher_residual":
+            return torch.cat([latent_residual, hand_action], dim=-1)
+
+        action_transform_module = getattr(self.env, "action_transform_module", None)
+        if action_transform_module is None:
+            raise RuntimeError(
+                "diffusion_decoder_distill=True requires env.action_transform_module"
+            )
+
+        batch_shape = latent_residual.shape[:-1]
+        batch_ndim = len(batch_shape)
+        if batch_ndim == 0:
+            raise RuntimeError("diffusion decoder target requires a batched teacher action")
+
+        atm_obs_dict = {}
+        actor_obs = obs_dict.get("policy_atm", obs_dict.get("actor_obs"))
+        if actor_obs is None:
+            raise RuntimeError("diffusion decoder target requires actor_obs or policy_atm")
+        atm_obs_dict["actor_obs"] = actor_obs
+        if "tokenizer" in obs_dict:
+            atm_obs_dict["tokenizer"] = obs_dict["tokenizer"]
+
+        flat_atm_obs_dict = {}
+        for key, value in atm_obs_dict.items():
+            if not torch.is_tensor(value):
+                flat_atm_obs_dict[key] = value
+                continue
+            if value.shape[:batch_ndim] != batch_shape:
+                flat_atm_obs_dict[key] = value
+                continue
+            flat_value = value.reshape(-1, *value.shape[batch_ndim:])
+            if flat_value.dim() == 2:
+                flat_value = flat_value.unsqueeze(1)
+            flat_atm_obs_dict[key] = flat_value
+
+        latent_scale = float(getattr(self.env, "_latent_residual_scale", 1.0))
+        latent_mode = getattr(self.env, "_latent_residual_mode", "pre_quantization")
+        scaled_residual = latent_residual.reshape(-1, self.diffusion_latent_dim) * latent_scale
+        action_transform_module.eval()
+        with torch.no_grad():
+            _ = action_transform_module(
+                flat_atm_obs_dict,
+                latent_residual=scaled_residual,
+                latent_residual_mode=latent_mode,
+            )
+            atm_module = action_transform_module.actor_module
+            full_latent = getattr(atm_module, "_last_full_latent_flat", None)
+            if full_latent is None:
+                raise RuntimeError("ATM did not expose _last_full_latent_flat")
+            full_latent = full_latent.to(latent_residual.device)
+            if full_latent.dim() == 3:
+                full_latent = full_latent[:, -1]
+            full_latent = full_latent.reshape(*batch_shape, self.diffusion_latent_dim)
+        return torch.cat([full_latent.detach(), hand_action], dim=-1)
 
     def _compute_loss(self, forward_results, mb_rollout_data):
         """Compute the total loss as a weighted sum of PPO and optional auxiliary losses.
@@ -1764,6 +1981,18 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         # env
         obs_dict = self.env.reset_all()
+        if self.config.get("init_at_random_ep_len", False):
+            env_for_lengths = self.env if hasattr(self.env, "episode_length_buf") else None
+            if env_for_lengths is None and hasattr(self.env, "env"):
+                env_for_lengths = self.env.env
+            if env_for_lengths is not None and hasattr(env_for_lengths, "episode_length_buf"):
+                max_episode_length = int(getattr(env_for_lengths, "max_episode_length", 0))
+                if max_episode_length > 0:
+                    episode_lengths = torch.randint_like(
+                        env_for_lengths.episode_length_buf,
+                        high=max_episode_length,
+                    )
+                    env_for_lengths.episode_length_buf[:] = episode_lengths
         for obs_key in obs_dict.keys():  # noqa: SIM118
             obs_dict[obs_key] = obs_dict[obs_key].to(device)
 

@@ -494,6 +494,7 @@ class ObservationsCfg:
     height_map: HeightMapCfg = None
     teacher: TeacherCfg = None  # Teacher observations for distillation
     camera_rgb: CameraRGBCfg = None  # Separate vision observation group
+    state_token: PolicyCfg = None  # Current joint position + projected gravity token input
     residual_action: ResidualAction = None
 
 

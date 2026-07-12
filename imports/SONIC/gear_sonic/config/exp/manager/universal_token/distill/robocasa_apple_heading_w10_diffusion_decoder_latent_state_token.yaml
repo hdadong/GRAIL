@@ -1,0 +1,57 @@
+# @package _global_
+#
+# RGB diffusion-policy student with one proprioceptive state token.
+#
+# The added state token follows the GR00T-style pattern of normalizing robot
+# state before feeding it to a state encoder.  Here the state is the current
+# body joint position plus projected gravity, encoded into one condition token.
+
+defaults:
+  - /exp/manager/universal_token/distill/robocasa_apple_heading_w10_diffusion_decoder_latent
+  - _self_
+
+exp_var: robocasa_apple_heading_w10_diffusion_decoder_latent_state_token
+experiment_name: ${exp_base}_${exp_var}
+
+algo:
+  config:
+    actor:
+      backbone:
+        module_config_dict:
+          state_key: state_token
+          state_input_dim: 32
+          state_token_dim: 128
+          state_hidden_dims: [128, 128]
+          state_normalization: standardize
+          state_norm_momentum: 0.05
+          state_norm_clip: 5.0
+          state_std_eps: 1.0e-4
+
+manager_env:
+  observations:
+    state_token:
+      _target_: gear_sonic.envs.manager_env.mdp.observations.PolicyCfg
+      enable_corruption: true
+      concatenate_terms: true
+
+      joint_pos_wo_hand:
+        _target_: isaaclab.managers.ObservationTermCfg
+        func: gear_sonic.envs.manager_env.mdp:joint_pos_wo_hand
+        params:
+          asset_cfg:
+            _target_: isaaclab.managers.SceneEntityCfg
+            name: robot
+        noise:
+          _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+          n_min: -0.01
+          n_max: 0.01
+
+      gravity_dir:
+        _target_: isaaclab.managers.ObservationTermCfg
+        func: gear_sonic.envs.manager_env.mdp:gravity_dir
+        params:
+          command_name: motion
+        noise:
+          _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+          n_min: -0.05
+          n_max: 0.05

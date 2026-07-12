@@ -1,0 +1,77 @@
+# @package _global_
+#
+# Diffusion-policy student for the apple tabletop task.
+#
+# The policy conditions only on first-person RGB and predicts the decoder-input
+# latent directly.  The frozen SONIC decoder still receives proprioception from
+# the environment wrapper when executing the predicted latent.
+
+defaults:
+  - /exp/manager/universal_token/distill/robocasa_apple_heading_w10_visual_adaptor_dagger
+  - _self_
+
+exp_var: robocasa_apple_heading_w10_diffusion_decoder_latent
+experiment_name: ${exp_base}_${exp_var}
+
+algo:
+  config:
+    # Keep the frozen teacher loaded, but do not use the old action_mean MSE
+    # objective.  The diffusion target is built from the teacher and ATM below.
+    use_dagger: true
+    ppo_loss_coef: 0.0
+    distill_teacher_loss_coef: 0.0
+    diffusion_decoder_distill: true
+    diffusion_target_key: diffusion_target
+    diffusion_target_latent_mode: decoder_input
+    diffusion_latent_dim: 64
+    diffusion_hand_dim: 2
+    compute_aux_loss: true
+    aux_loss_scale: 1.0
+    distill_rollout_with_action_mean: true
+
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: false
+      input_key: actor_obs
+      input_obs_dict: true
+      output_original_obs_dict: true
+      has_aux_loss: true
+      backbone:
+        _target_: gear_sonic.trl.modules.diffusion_policy_modules.EncoderRgbDiffusionPolicy
+        process_output_dim: true
+        module_config_dict:
+          image_key: camera_rgb
+          diffusion_target_key: ${algo.config.diffusion_target_key}
+          output_dim: [robot_action_dim]
+          image_feature_dim: 128
+          cond_dim: 512
+          timestep_dim: 128
+          cond_hidden_dims: [512]
+          denoiser_hidden_dims: [1024, 1024, 512]
+          resnet_type: resnet18
+          pretrained: true
+          trainable: true
+          normalize_image: true
+          activation: SiLU
+          # Match Isaac-GR00T N1.7 normalized flow-matching action head:
+          # train on velocity = normalized_target - noise and integrate from noise.
+          diffusion_objective: flow_matching
+          target_normalization: standardize
+          target_norm_momentum: 0.05
+          target_norm_clip: 5.0
+          target_std_eps: 1.0e-4
+          num_train_timesteps: 100
+          num_inference_steps: 4
+          num_timestep_buckets: 1000
+          noise_beta_alpha: 1.5
+          noise_beta_beta: 1.0
+          noise_s: 0.999
+          beta_start: 1.0e-4
+          beta_end: 2.0e-2
+          diffusion_loss_coef: 1.0
+
+manager_env:
+  config:
+    # The diffusion student predicts the full latent sent to the decoder, not a
+    # residual to add to the ATM encoder output.
+    use_student_direct_latent: true
