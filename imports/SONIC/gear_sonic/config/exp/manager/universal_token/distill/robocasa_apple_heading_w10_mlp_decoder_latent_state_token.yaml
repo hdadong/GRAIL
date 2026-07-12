@@ -1,0 +1,23 @@
+# @package _global_
+#
+# RGB/state-token MLP baseline for decoder-latent distillation.
+# It uses the same clean teacher decoder-latent target as the diffusion policy,
+# but trains a direct MLP regression head with MSE instead of a diffusion loss.
+
+defaults:
+  - /exp/manager/universal_token/distill/robocasa_apple_heading_w10_diffusion_decoder_latent_state_token
+  - _self_
+
+exp_var: robocasa_apple_heading_w10_mlp_decoder_latent_state_token
+experiment_name: ${exp_base}_${exp_var}
+
+algo:
+  config:
+    actor:
+      backbone:
+        _target_: gear_sonic.trl.modules.diffusion_policy_modules.EncoderRgbMlpPolicy
+        module_config_dict:
+          # Marker only; EncoderRgbMlpPolicy trains latent_mlp_mse and does not use diffusion sampling/loss.
+          diffusion_objective: mlp_mse
+          mlp_hidden_dims: [1024, 1024, 512]
+          mlp_loss_coef: 1.0

@@ -84,6 +84,7 @@ class EncoderRgbDiffusionPolicy(nn.Module):
         image_feature_dim = int(module_config_dict.get("image_feature_dim", 128))
         state_token_dim = int(module_config_dict.get("state_token_dim", 128))
         cond_dim = int(module_config_dict.get("cond_dim", 512))
+        self.cond_dim = cond_dim
         timestep_dim = int(module_config_dict.get("timestep_dim", 128))
 
         self.image_encoder = self._build_image_encoder(module_config_dict, image_feature_dim)
@@ -468,3 +469,62 @@ class EncoderRgbDiffusionPolicy(nn.Module):
             }
 
         return self._sample(cond)
+
+class EncoderRgbMlpPolicy(EncoderRgbDiffusionPolicy):
+    """RGB/state latent policy trained with direct MSE, not diffusion loss."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        module_config_dict = kwargs.get("module_config_dict") or {}
+        if not module_config_dict and len(args) >= 2 and args[1] is not None:
+            module_config_dict = args[1]
+        activation = module_config_dict.get("activation", "SiLU")
+        self.mlp_loss_coef = float(module_config_dict.get("mlp_loss_coef", 1.0))
+        self.action_head = _build_mlp(
+            self.cond_dim,
+            module_config_dict.get("mlp_hidden_dims", [1024, 1024, 512]),
+            self.action_dim,
+            activation,
+        )
+
+    def forward(self, input, compute_aux_loss=False, **kwargs):
+        if not hasattr(input, "__getitem__"):
+            raise TypeError("EncoderRgbMlpPolicy expects an obs_dict-like input")
+        cond = self._encode_condition(input, update_state_stats=compute_aux_loss)
+        pred_normalized = self.action_head(cond)
+        pred_action = self._denormalize_target(pred_normalized)
+
+        if compute_aux_loss:
+            target = self._extract_target(kwargs)
+            if target is None:
+                raise ValueError(
+                    f"{self.__class__.__name__} requires {self.diffusion_target_key} "
+                    "when compute_aux_loss=True"
+                )
+            target = target.to(device=cond.device, dtype=cond.dtype)
+            if target.shape[-1] != self.action_dim:
+                raise ValueError(
+                    f"MLP target dim mismatch: got {target.shape[-1]}, expected {self.action_dim}"
+                )
+            with torch.no_grad():
+                self._update_target_stats(target)
+            normalized_target = self._normalize_target(target)
+            mlp_loss = F.mse_loss(pred_normalized, normalized_target)
+
+            target_flat = target.detach().float().reshape(-1, self.action_dim)
+            norm_flat = normalized_target.detach().float().reshape(-1, self.action_dim)
+            pred_flat = pred_action.detach().float().reshape(-1, self.action_dim)
+            return {
+                "action_mean": pred_action,
+                "aux_losses": {
+                    "latent_mlp_mse": mlp_loss,
+                    "mlp_target/raw_abs_mean": target_flat.abs().mean(),
+                    "mlp_target/raw_std_mean": target_flat.std(dim=0, unbiased=False).mean(),
+                    "mlp_target/norm_abs_mean": norm_flat.abs().mean(),
+                    "mlp_target/norm_std_mean": norm_flat.std(dim=0, unbiased=False).mean(),
+                    "mlp_pred/raw_abs_mean": pred_flat.abs().mean(),
+                },
+                "aux_loss_coef": {"latent_mlp_mse": self.mlp_loss_coef},
+            }
+
+        return pred_action
